@@ -1,0 +1,7 @@
+node_modules/
+*.tsbuildinfo
+.claude/
+mod-reference/
+
+*.local.json
+CLAUDE.md

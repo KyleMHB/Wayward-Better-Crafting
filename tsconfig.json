@@ -1,0 +1,28 @@
+{
+    "extends": "./mod-reference/definitions/tsconfig.mod.base.json",
+    "compilerOptions": {
+        "ignoreDeprecations": "6.0",
+        "baseUrl": ".",
+        "types": ["jquery"],
+        "paths": {
+            "@wayward/goodstream": [
+                "node_modules/@wayward/goodstream/Stream",
+                "mod-reference/definitions/node_modules/@wayward/goodstream/Stream"
+            ],
+            "@wayward/goodstream/*": [
+                "node_modules/@wayward/goodstream/*",
+                "mod-reference/definitions/node_modules/@wayward/goodstream/*"
+            ],
+            "@wayward/game/*": [
+                "mod-reference/definitions/definitions/game/*"
+            ],
+            "@wayward/utilities/*": [
+                "mod-reference/definitions/definitions/utilities/*"
+            ]
+        }
+    },
+    "include": [
+        "betterCrafting.ts",
+        "src/**/*.ts"
+    ]
+}
