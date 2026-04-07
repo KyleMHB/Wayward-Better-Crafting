@@ -18,6 +18,10 @@ export declare const STAMINA_COST_PER_LEVEL: Partial<Record<RecipeLevel, number>
 export default class BetterCraftingPanel extends Component {
     itemType: number;
     private scrollContent;
+    private normalScrollInner;
+    private bulkScrollInner;
+    private _sectionResizeObserver?;
+    private _sectionResizeRafId?;
     private recipe?;
     private onCraftCallback;
     private onBulkCraftCallback;
@@ -33,16 +37,16 @@ export default class BetterCraftingPanel extends Component {
     private _hoveredMouseX;
     private _hoveredMouseY;
     private shiftHeld;
-    private _itemContainerEls;
-    private _resizeObserver;
-    private _bodyEl;
-    private _outputCardEl;
+    private _inventoryRefreshTimer;
+    private _inventoryWatchHandlers;
     private activeTab;
     private normalTabBtn;
     private bulkTabBtn;
     private normalBody;
+    private normalStaticContent;
     private normalFooter;
     private bulkBody;
+    private bulkStaticContent;
     private bulkFooter;
     private normalResultsEl;
     private bulkResultsEl;
@@ -53,9 +57,6 @@ export default class BetterCraftingPanel extends Component {
     private bulkMaxLabel;
     private bulkCraftBtnEl;
     private bulkScrollContent;
-    private _bulkItemContainerEls;
-    private _bulkOutputCardEl;
-    private _bulkBodyEl;
     private _bulkContentDirty;
     private bulkStopBtn;
     private bulkQtyRow;
@@ -69,6 +70,9 @@ export default class BetterCraftingPanel extends Component {
     private readonly _onBlur;
     constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback, getSettings: SettingsAccessor);
     destroyListeners(): void;
+    private _subscribeInventoryWatch;
+    private _unsubscribeInventoryWatch;
+    private scheduleInventoryRefresh;
     private switchTab;
     showPanel(): void;
     hidePanel(): void;
@@ -88,12 +92,13 @@ export default class BetterCraftingPanel extends Component {
     private buildOutputCard;
     private addBaseComponentSection;
     private addComponentSection;
+    private createStaticContentContainer;
+    private createScrollPort;
     private createSection;
     private createLabelRow;
     private createItemsContainer;
     private makeFullWidthWrapper;
     private appendMissing;
-    private _updateItemListHeights;
     private addItemRow;
     private buildBulkContent;
     private addBulkHelpBox;
@@ -107,11 +112,14 @@ export default class BetterCraftingPanel extends Component {
     private updateBulkCraftBtnState;
     private bulkCrafting;
     private onBulkCraft;
-    resolveForBulkCraft(itemType: ItemType, excludedIds: Set<number>): {
+    resolveForBulkCraft(itemType: ItemType, excludedIds: Set<number>, sessionConsumedIds?: ReadonlySet<number>): {
         tools: Item[];
         consumed: Item[];
         base: Item | undefined;
     } | null;
+    private getBulkExcludedIds;
+    private resolveBulkCraftSelection;
+    private findBulkCandidates;
     private bcGetOrCreateTooltip;
     private bcShowTooltip;
     private bcHideTooltip;

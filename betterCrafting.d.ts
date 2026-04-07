@@ -41,6 +41,7 @@ export default class BetterCrafting extends Mod {
     private getItemSignature;
     private executeCraft;
     private waitForTurnEnd;
+    private waitForActionDelayClear;
     private abortBulkCraft;
     private registerBulkInterruptHooks;
     private executeBulkCraft;

@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "build": "npm.cmd exec --yes --package typescript -- tsc --build --force --pretty tsconfig.json",
+    "deploy": "npm.cmd run build && node ./scripts/deploy-mod.mjs"
+  },
   "devDependencies": {
     "@types/jquery": "^4.0.0"
   }

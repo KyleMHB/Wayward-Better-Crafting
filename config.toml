@@ -1,0 +1,7 @@
+[build]
+source = "."
+
+[deploy]
+target = "E:\\Steam\\steamapps\\common\\Wayward\\mods\\Better Crafting"
+overwrite = true
+cleanTarget = false

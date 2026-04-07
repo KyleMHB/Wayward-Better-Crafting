@@ -133,7 +133,7 @@ export default class BetterCrafting extends Mod {
             const unsafeToggle = new CheckButton();
             unsafeToggle.setText(TranslationImpl.generator("Unsafe Bulk Crafting"));
             unsafeToggle.addDescription(paragraph => {
-                paragraph.setText(TranslationImpl.generator("Ignore stamina limits for bulk quantity and only stop when health gets critically low."));
+                paragraph.setText(TranslationImpl.generator("Ignore stamina limits and bypass damage-based safety stops during bulk crafting."));
             });
             unsafeToggle.event.subscribe("toggle", (_: unknown, checked: boolean) => {
                 this.globalData.unsafeBulkCrafting = checked;
@@ -204,18 +204,9 @@ export default class BetterCrafting extends Mod {
 
     private shouldAbortForHealthLoss(stat: IStat, oldValue: number): boolean {
         if (stat.type !== Stat.Health || (stat.value ?? 0) >= oldValue) return false;
-        if (!this.settings.unsafeBulkCrafting) return true;
+        if (this.settings.unsafeBulkCrafting) return false;
 
-        try {
-            const maxHealth = localPlayer?.getMaxHealth?.(true) ?? stat.max;
-            if (typeof maxHealth !== "number" || !Number.isFinite(maxHealth) || maxHealth <= 0) {
-                return true;
-            }
-
-            return stat.value < maxHealth * 0.1;
-        } catch {
-            return true;
-        }
+        return true;
     }
 
     private onKeyDown = (e: KeyboardEvent) => {
@@ -423,6 +414,20 @@ export default class BetterCrafting extends Mod {
         return Promise.race([turnEndPromise, abortPromise]);
     }
 
+    private waitForActionDelayClear(): Promise<void> {
+        return new Promise<void>(resolve => {
+            const poll = () => {
+                if (this.bulkAbortController?.aborted || !(localPlayer as any)?.hasDelay?.()) {
+                    resolve();
+                } else {
+                    requestAnimationFrame(poll);
+                }
+            };
+
+            poll();
+        });
+    }
+
     private abortBulkCraft(reason: string): void {
         if (this.bulkAbortController) {
             this.bulkAbortController.aborted = true;
@@ -491,8 +496,16 @@ export default class BetterCrafting extends Mod {
         this.isBulkCrafting = true;
         this.bypassIntercept = true;
         const craftResults: ICraftDisplayResult[] = [];
+        // Accumulate IDs of items resolved as consumed each iteration. Passed to
+        // resolveForBulkCraft so items the game engine hasn't physically removed yet
+        // are not re-picked on the next iteration (prevents phantom under-consumption).
+        const sessionConsumedIds = new Set<number>();
         try {
             for (let i = 0; i < quantity; i++) {
+                if (this.bulkAbortController.aborted) break;
+
+                // Never begin the next craft while the previous one is still in real-time delay.
+                await this.waitForActionDelayClear();
                 if (this.bulkAbortController.aborted) break;
 
                 // Player / island null-guard.
@@ -501,10 +514,10 @@ export default class BetterCrafting extends Mod {
                 // Stamina pre-check.
                 const currentStamina: number =
                     (localPlayer as any).stat?.get?.(Stat.Stamina)?.value ?? 0;
-                if (currentStamina < staminaCost) break;
+                if (!this.settings.unsafeBulkCrafting && currentStamina < staminaCost) break;
 
                 // Re-resolve items — prior crafts consume materials.
-                const resolved = this.panel?.resolveForBulkCraft(itemType, excludedIds);
+                const resolved = this.panel?.resolveForBulkCraft(itemType, excludedIds, sessionConsumedIds);
                 if (!resolved) break;
 
                 // Check abort again (events may have fired during resolve).
@@ -532,6 +545,16 @@ export default class BetterCrafting extends Mod {
                     throw error;
                 }
 
+                // Track consumed IDs to guard against re-picking before game state updates.
+                for (const item of resolved.consumed) {
+                    const id = this.getItemId(item);
+                    if (id !== undefined) sessionConsumedIds.add(id);
+                }
+                if (resolved.base) {
+                    const id = this.getItemId(resolved.base);
+                    if (id !== undefined) sessionConsumedIds.add(id);
+                }
+
                 // Update progress counter immediately after the craft completes.
                 this.panel?.setBulkProgress(i + 1, quantity);
 
@@ -542,10 +565,10 @@ export default class BetterCrafting extends Mod {
             cleanupHooks();
             this.bulkAbortController = null;
             this.panel?.setBulkAbortCallback(null);
-            this.panel?.showBulkCraftResults(craftResults);
-            this.panel?.onBulkCraftEnd();
             this.isBulkCrafting = false;
             this.bypassIntercept = false;
+            this.panel?.showBulkCraftResults(craftResults);
+            this.panel?.onBulkCraftEnd();
         }
     }
 

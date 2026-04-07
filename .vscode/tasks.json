@@ -1,0 +1,21 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "typescript",
+			"tsconfig": "tsconfig.json",
+			"problemMatcher": [
+				"$tsc"
+			],
+			"group": "build",
+			"label": "tsc: build - tsconfig.json"
+		},
+		{
+			"type": "shell",
+			"command": "npm run deploy",
+			"problemMatcher": ["$tsc"],
+			"group": "build",
+			"label": "deploy: build and copy to Wayward mods"
+		}
+	]
+}

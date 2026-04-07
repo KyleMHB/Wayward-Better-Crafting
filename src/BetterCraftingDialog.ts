@@ -35,6 +35,13 @@ export interface ICraftDisplayResult {
     itemType: ItemType;
 }
 
+interface IBulkCraftSelection {
+    tools: Item[];
+    consumed: Item[];
+    base: Item | undefined;
+    permanentlyConsumedIds: Set<number>;
+}
+
 // Quality enum value -> CSS color
 const QUALITY_COLORS: Record<number, string> = {
     [Quality.None]:          "#e0d0b0",
@@ -80,13 +87,9 @@ function isItemProtected(item: Item): boolean {
     return (item as any).isProtected === true || (item as any).protected === true;
 }
 
-// Task 2: Row is ~30% smaller than the original 42px.
-// 42 * 0.70 ≈ 29 → use 30px for a clean value.
-const ROW_MIN_HEIGHT = 30;   // px (was 42)
-const ROW_PADDING_V   = 4;    // px top+bottom (was 8)
+const ROW_MIN_HEIGHT = 30;   // px
+const ROW_PADDING_V   = 4;    // px top+bottom
 const ROW_MARGIN      = 2;    // px top + 2px bottom
-const ROW_HEIGHT_PX   = ROW_MIN_HEIGHT + ROW_PADDING_V * 2 + ROW_MARGIN * 2; // ~42px total
-const MAX_VISIBLE_ROWS = 5;
 
 /**
  * Approximate stamina cost per craft, keyed by RecipeLevel.
@@ -103,6 +106,10 @@ export const STAMINA_COST_PER_LEVEL: Partial<Record<RecipeLevel, number>> = {
 export default class BetterCraftingPanel extends Component {
     public itemType: number = 0;
     private scrollContent: Component;
+    private normalScrollInner!: Component;
+    private bulkScrollInner!: Component;
+    private _sectionResizeObserver?: ResizeObserver;
+    private _sectionResizeRafId?: number;
     private recipe?: IRecipe;
     private onCraftCallback: CraftCallback;
     private onBulkCraftCallback: BulkCraftCallback;
@@ -124,19 +131,23 @@ export default class BetterCraftingPanel extends Component {
     private _hoveredMouseY = 0;
     private shiftHeld = false;
 
-    // ── Resize observer for per-section item list heights ─────────────────────
-    private _itemContainerEls: HTMLElement[] = [];
-    private _resizeObserver: ResizeObserver | null = null;
-    private _bodyEl: HTMLElement | null = null;
-    private _outputCardEl: HTMLElement | null = null;
+    // ── Inventory watching ────────────────────────────────────────────────────
+    private _inventoryRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    private _inventoryWatchHandlers: {
+        onAdd: () => void;
+        onRemove: () => void;
+        onUpdate: () => void;
+    } | null = null;
 
     // ── Tab state ─────────────────────────────────────────────────────────────
     private activeTab: "normal" | "bulk" = "normal";
     private normalTabBtn!: HTMLButtonElement;
     private bulkTabBtn!: HTMLButtonElement;
     private normalBody!: Component;
+    private normalStaticContent!: Component;
     private normalFooter!: Component;
     private bulkBody!: Component;
+    private bulkStaticContent!: Component;
     private bulkFooter!: Component;
     private normalResultsEl!: HTMLDivElement;
     private bulkResultsEl!: HTMLDivElement;
@@ -151,9 +162,6 @@ export default class BetterCraftingPanel extends Component {
     private bulkMaxLabel: HTMLSpanElement | null = null;
     private bulkCraftBtnEl: Button | null = null;
     private bulkScrollContent!: Component;
-    private _bulkItemContainerEls: HTMLElement[] = [];
-    private _bulkOutputCardEl: HTMLElement | null = null;
-    private _bulkBodyEl: HTMLElement | null = null;
     private _bulkContentDirty = true;
     private bulkStopBtn: Button | null = null;
     private bulkQtyRow: HTMLElement | null = null;
@@ -280,6 +288,11 @@ export default class BetterCraftingPanel extends Component {
                     scrollbar-color: #888888 rgba(0,0,0,0.3);
                 }
 
+                /* ── Section height cap (updated by ResizeObserver) ──────────── */
+                .better-crafting-section {
+                    max-height: var(--bc-section-height, 300px);
+                }
+
                 /* ── Tab bar ─────────────────────────────────────────────────── */
                 .bc-tab-bar {
                     display: flex;
@@ -324,6 +337,14 @@ export default class BetterCraftingPanel extends Component {
                     padding: 2px 4px;
                     font-family: inherit;
                     font-size: 0.92em;
+                    appearance: textfield;
+                    -moz-appearance: textfield;
+                }
+                .bc-qty-input::-webkit-outer-spin-button,
+                .bc-qty-input::-webkit-inner-spin-button {
+                    appearance: none;
+                    -webkit-appearance: none;
+                    margin: 0;
                 }
                 .bc-qty-btn {
                     padding: 2px 8px;
@@ -431,6 +452,15 @@ export default class BetterCraftingPanel extends Component {
                     background: rgba(10,22,38,0.85) !important;
                     color: #8ab8d8 !important;
                     border-color: #1e3a58 !important;
+                    appearance: textfield !important;
+                    -moz-appearance: textfield !important;
+                    -webkit-appearance: none !important;
+                }
+                .bc-panel-bulk .bc-qty-input::-webkit-outer-spin-button,
+                .bc-panel-bulk .bc-qty-input::-webkit-inner-spin-button {
+                    appearance: none !important;
+                    -webkit-appearance: none !important;
+                    margin: 0 !important;
                 }
                 .bc-panel-bulk .bc-qty-btn {
                     background: rgba(16,36,60,0.85) !important;
@@ -510,11 +540,10 @@ export default class BetterCraftingPanel extends Component {
         this.style.set("left", "50%");
         this.style.set("transform", "translateX(-50%)");
 
-        this.style.set("width", "fit-content");
-        this.style.set("min-width", "840px");
-        this.style.set("max-width", "90vw");
-        this.style.set("height", "max-content");
-        this.style.set("max-height", "84vh");
+        this.style.set("width", "20vw");
+        this.style.set("min-width", "280px");
+        this.style.set("height", "40vh");
+        this.style.set("min-height", "200px");
 
         this.style.set("resize", "both");
         this.style.set("overflow", "hidden");
@@ -580,21 +609,20 @@ export default class BetterCraftingPanel extends Component {
 
         // ── Normal: Scrollable body ───────────────────────────────────────────
         this.normalBody = new Component();
-        this.normalBody.classes.add("better-crafting-body", "dialog-content");
+        this.normalBody.classes.add("better-crafting-body");
+        this.normalBody.style.set("display", "flex");
         this.normalBody.style.set("flex", "1 1 0");
+        this.normalBody.style.set("flex-direction", "column");
         this.normalBody.style.set("min-height", "0");
-        this.normalBody.style.set("overflow-y", "auto");
-        this.normalBody.style.set("scrollbar-width", "thin");
-        this.normalBody.style.set("scrollbar-color", "#888888 rgba(0,0,0,0.3)");
+        this.normalBody.style.set("overflow", "hidden");
         this.normalBody.style.set("padding", "8px 10px");
-        this._bodyEl = this.normalBody.element;
+        this.normalBody.style.set("gap", "8px");
         this.append(this.normalBody);
 
-        this.scrollContent = new Component();
-        this.scrollContent.style.set("display", "flex");
-        this.scrollContent.style.set("flex-wrap", "wrap");
-        this.scrollContent.style.set("gap", "8px");
-        this.scrollContent.style.set("align-items", "flex-start");
+        this.normalStaticContent = this.createStaticContentContainer();
+        this.normalBody.append(this.normalStaticContent);
+
+        [this.scrollContent, this.normalScrollInner] = this.createScrollPort();
         this.normalBody.append(this.scrollContent);
 
         this.normalResultsEl = this.createResultsContainer();
@@ -630,22 +658,20 @@ export default class BetterCraftingPanel extends Component {
 
         // ── Bulk: Scrollable body ─────────────────────────────────────────────
         this.bulkBody = new Component();
-        this.bulkBody.classes.add("better-crafting-body", "dialog-content");
+        this.bulkBody.classes.add("better-crafting-body");
         this.bulkBody.style.set("flex", "1 1 0");
+        this.bulkBody.style.set("flex-direction", "column");
         this.bulkBody.style.set("min-height", "0");
-        this.bulkBody.style.set("overflow-y", "auto");
-        this.bulkBody.style.set("scrollbar-width", "thin");
-        this.bulkBody.style.set("scrollbar-color", "#888888 rgba(0,0,0,0.3)");
+        this.bulkBody.style.set("overflow", "hidden");
         this.bulkBody.style.set("padding", "8px 10px");
-        this.bulkBody.style.set("display", "none"); // hidden until tab switch
-        this._bulkBodyEl = this.bulkBody.element;
+        this.bulkBody.style.set("gap", "8px");
+        this.bulkBody.style.set("display", "none");
         this.append(this.bulkBody);
 
-        this.bulkScrollContent = new Component();
-        this.bulkScrollContent.style.set("display", "flex");
-        this.bulkScrollContent.style.set("flex-wrap", "wrap");
-        this.bulkScrollContent.style.set("gap", "8px");
-        this.bulkScrollContent.style.set("align-items", "flex-start");
+        this.bulkStaticContent = this.createStaticContentContainer();
+        this.bulkBody.append(this.bulkStaticContent);
+
+        [this.bulkScrollContent, this.bulkScrollInner] = this.createScrollPort();
         this.bulkBody.append(this.bulkScrollContent);
 
         this.bulkResultsEl = this.createResultsContainer();
@@ -666,11 +692,6 @@ export default class BetterCraftingPanel extends Component {
         // Quantity controls row inside bulk footer
         const qtyRow = document.createElement("div");
         qtyRow.style.cssText = "display:flex;align-items:center;gap:4px;margin-right:auto;";
-
-        const qtyLabel = document.createElement("span");
-        qtyLabel.textContent = "Qty:";
-        qtyLabel.style.cssText = "color:#9a8860;font-size:0.92em;";
-        qtyRow.appendChild(qtyLabel);
 
         const minusBtn = document.createElement("button");
         minusBtn.className = "bc-qty-btn";
@@ -759,9 +780,29 @@ export default class BetterCraftingPanel extends Component {
         this.bulkStopBtn.event.subscribe("activate", () => this.onBulkAbortCallback?.());
         this.bulkFooter.append(this.bulkStopBtn);
 
-        // ── Task 3: ResizeObserver — update per-section list heights on resize ─
-        this._resizeObserver = new ResizeObserver(() => this._updateItemListHeights());
-        this._resizeObserver.observe(this.element);
+        // ── Section height ResizeObserver ─────────────────────────────────────
+        // Keeps --bc-section-height in sync with the visible scroll area so each
+        // section box never overflows its fair share of the available height.
+        // The rAF defer breaks the ResizeObserver loop: updating a CSS variable
+        // that changes section max-height can cause scrollContent to resize again
+        // in the same layout cycle, which the browser flags as a loop error.
+        // Deferring to the next frame lets the current layout settle first.
+        if (typeof ResizeObserver !== 'undefined') {
+            this._sectionResizeObserver = new ResizeObserver(() => {
+                if (this._sectionResizeRafId !== undefined) cancelAnimationFrame(this._sectionResizeRafId);
+                this._sectionResizeRafId = requestAnimationFrame(() => {
+                    this._sectionResizeRafId = undefined;
+                    const h = this.activeTab === "normal"
+                           ? this.scrollContent.element.clientHeight
+                           : this.bulkScrollContent.element.clientHeight;
+                    if (h > 0) {
+                        this.element.style.setProperty('--bc-section-height', `${h}px`);
+                    }
+                });
+            });
+            this._sectionResizeObserver.observe(this.scrollContent.element);
+            this._sectionResizeObserver.observe(this.bulkScrollContent.element);
+        }
     }
 
     /** Call when the mod unloads to clean up listeners and observers. */
@@ -769,10 +810,61 @@ export default class BetterCraftingPanel extends Component {
         document.removeEventListener("keydown", this._onShiftDown);
         document.removeEventListener("keyup", this._onShiftUp);
         window.removeEventListener("blur", this._onBlur);
-        this._resizeObserver?.disconnect();
-        this._resizeObserver = null;
+        this._unsubscribeInventoryWatch();
+        if (this._inventoryRefreshTimer !== null) {
+            clearTimeout(this._inventoryRefreshTimer);
+            this._inventoryRefreshTimer = null;
+        }
         this.bcTooltipEl?.remove();
         this.bcTooltipEl = null;
+        if (this._sectionResizeRafId !== undefined) {
+            cancelAnimationFrame(this._sectionResizeRafId);
+            this._sectionResizeRafId = undefined;
+        }
+        this._sectionResizeObserver?.disconnect();
+        this._sectionResizeObserver = undefined;
+    }
+
+    // ── Inventory watching ────────────────────────────────────────────────────
+
+    private _subscribeInventoryWatch(): void {
+        if (this._inventoryWatchHandlers || !localPlayer) return;
+
+        const onAdd    = () => this.scheduleInventoryRefresh();
+        const onRemove = () => this.scheduleInventoryRefresh();
+        const onUpdate = () => this.scheduleInventoryRefresh();
+
+        localPlayer.event.subscribe("inventoryItemAdd",    onAdd);
+        localPlayer.event.subscribe("inventoryItemRemove", onRemove);
+        localPlayer.event.subscribe("inventoryItemUpdate", onUpdate);
+
+        this._inventoryWatchHandlers = { onAdd, onRemove, onUpdate };
+    }
+
+    private _unsubscribeInventoryWatch(): void {
+        if (!this._inventoryWatchHandlers || !localPlayer) return;
+        const { onAdd, onRemove, onUpdate } = this._inventoryWatchHandlers;
+        localPlayer.event.unsubscribe("inventoryItemAdd",    onAdd);
+        localPlayer.event.unsubscribe("inventoryItemRemove", onRemove);
+        localPlayer.event.unsubscribe("inventoryItemUpdate", onUpdate);
+        this._inventoryWatchHandlers = null;
+    }
+
+    private scheduleInventoryRefresh(): void {
+        if (this._inventoryRefreshTimer !== null) {
+            clearTimeout(this._inventoryRefreshTimer);
+        }
+        this._inventoryRefreshTimer = setTimeout(() => {
+            this._inventoryRefreshTimer = null;
+            if (!this.panelVisible || this.bulkCrafting) return;
+            if (this.activeTab === "bulk") {
+                this._bulkContentDirty = true;
+                this.buildBulkContent();
+            } else {
+                // Rebuild normal tab; clearResults=false preserves the last craft result.
+                this.updateRecipe(this.itemType, false);
+            }
+        }, 200);
     }
 
     // ── Tab switching ─────────────────────────────────────────────────────────
@@ -787,72 +879,49 @@ export default class BetterCraftingPanel extends Component {
         if (tab === "normal") {
             this.normalTabBtn.classList.add("bc-tab-active");
             this.bulkTabBtn.classList.remove("bc-tab-active");
-            this.normalBody.style.set("display", "");
+            this.normalBody.style.set("display", "flex");
             this.normalFooter.style.set("display", "flex");
             this.bulkBody.style.set("display", "none");
             this.bulkFooter.style.set("display", "none");
-            // Remove blue theme when returning to normal tab.
             this.element.classList.remove("bc-panel-bulk");
-            if (this._bodyEl) {
-                this._bodyEl.style.flex = "1 1 0";
-                this._bodyEl.style.minHeight = "0";
-            }
         } else {
             this.bulkTabBtn.classList.add("bc-tab-active");
             this.normalTabBtn.classList.remove("bc-tab-active");
             this.normalBody.style.set("display", "none");
             this.normalFooter.style.set("display", "none");
-            this.bulkBody.style.set("display", "");
+            this.bulkBody.style.set("display", "flex");
             this.bulkFooter.style.set("display", "flex");
-            // Apply blue theme when switching to bulk tab.
             this.element.classList.add("bc-panel-bulk");
-            if (this._bulkBodyEl) {
-                this._bulkBodyEl.style.flex = "1 1 0";
-                this._bulkBodyEl.style.minHeight = "0";
-            }
-            // Rebuild bulk content if recipe changed since last visit.
             if (this._bulkContentDirty) {
                 this.buildBulkContent();
             }
         }
         this.syncResultsVisibility();
-        this._updateItemListHeights();
     }
 
     public showPanel() {
-        // Always start on the single-craft tab regardless of which tab was active on close.
-        this.switchTab("normal");
+        const wasVisible = this.panelVisible;
 
-        this.style.set("width", "fit-content");
-        this.element.style.height = "";
-
-        if (this._bodyEl) {
-            this._bodyEl.style.flex    = "1 1 auto";
-            this._bodyEl.style.minHeight = "";
+        // Default to normal tab only when opening fresh; preserve active tab when a recipe
+        // changes while the dialog is already open (e.g. clicking a different recipe).
+        if (!wasVisible) {
+            this.switchTab("normal");
+            this._subscribeInventoryWatch();
         }
 
         this.style.set("display", "flex");
         this.updateHighlights();
-
-        requestAnimationFrame(() => {
-            if (!this.element) return;
-
-            const maxH    = Math.floor(window.innerHeight * 0.84);
-            const natural = this.element.offsetHeight;
-            if (natural > 40) {
-                this.element.style.height = `${Math.min(natural, maxH)}px`;
-            }
-
-            if (this._bodyEl) {
-                this._bodyEl.style.flex      = "1 1 0px";
-                this._bodyEl.style.minHeight = "0";
-            }
-        });
     }
 
     public hidePanel() {
         // If a bulk craft is active, abort it before hiding.
         if (this.bulkCrafting) this.onBulkAbortCallback?.();
+        // Stop watching inventory — no point refreshing a hidden dialog.
+        this._unsubscribeInventoryWatch();
+        if (this._inventoryRefreshTimer !== null) {
+            clearTimeout(this._inventoryRefreshTimer);
+            this._inventoryRefreshTimer = null;
+        }
         // Reset exclusion state so the next open starts clean.
         this.bulkExcludedIds.clear();
         this._lastBulkItemType = 0;
@@ -911,7 +980,7 @@ export default class BetterCraftingPanel extends Component {
                 ? [HighlightType.ItemGroup, component.type]
                 : [HighlightType.ItemType, component.type]);
         }
-        if (this.recipe.baseComponent !== undefined) {
+        if (this.recipe!.baseComponent !== undefined) {
             selectors.push(ItemManager.isGroup(this.recipe.baseComponent)
                 ? [HighlightType.ItemGroup, this.recipe.baseComponent]
                 : [HighlightType.ItemType, this.recipe.baseComponent]);
@@ -932,9 +1001,8 @@ export default class BetterCraftingPanel extends Component {
 
         this.selectedItems.clear();
         this.sectionCounters.clear();
-        this._itemContainerEls = [];
-        this._outputCardEl = null;
-        this.scrollContent.dump();
+        this.normalStaticContent.dump();
+        this.normalScrollInner.dump();
 
         const desc = itemDescriptions[itemType as ItemType];
         this.recipe = desc?.recipe;
@@ -947,13 +1015,13 @@ export default class BetterCraftingPanel extends Component {
             const noRecipe = new Text();
             noRecipe.setText(TranslationImpl.generator("No recipe found for this item."));
             noRecipe.style.set("color", "#ff6666");
-            this.scrollContent.append(noRecipe);
+            this.normalScrollInner.append(noRecipe);
             this.updateCraftButtonState();
             return;
         }
 
         // Pre-populate selections before building sections.
-        if (this.recipe.baseComponent !== undefined) {
+        if (this.recipe!.baseComponent !== undefined) {
             const items = this.findMatchingItems(this.recipe.baseComponent);
             const pre = this.getPreSelectedItems(items, 1, pendingIds);
             if (pre.length) this.selectedItems.set(-1, pre);
@@ -975,8 +1043,6 @@ export default class BetterCraftingPanel extends Component {
         if (this.activeTab === "bulk") {
             this.buildBulkContent();
         }
-
-        this._updateItemListHeights();
     }
 
     // ── Pre-selection helper ──────────────────────────────────────────────────
@@ -1123,15 +1189,13 @@ export default class BetterCraftingPanel extends Component {
         if (isBulk) {
             // Class used by the blue theme CSS selector.
             card.classes.add("bc-bulk-output-card");
-            this._bulkOutputCardEl = card.element;
-            this.bulkScrollContent.append(card);
+            this.bulkStaticContent.append(card);
         } else {
             const qualityNote = document.createElement("div");
             qualityNote.style.cssText = "font-size:0.85em;color:#7a6850;font-style:italic;";
             qualityNote.textContent = "Quality depends on your crafting skill level.";
             card.element.appendChild(qualityNote);
-            this._outputCardEl = card.element;
-            this.scrollContent.append(card);
+            this.normalStaticContent.append(card);
         }
     }
 
@@ -1139,9 +1203,10 @@ export default class BetterCraftingPanel extends Component {
         const section = this.createSection();
         const labelRow = this.createLabelRow();
 
+        const items = this.findMatchingItems(baseType);
         const label = new Text();
         label.classes.add("better-crafting-heading");
-        label.setText(TranslationImpl.generator(`Base: ${this.getTypeName(baseType)}`));
+        label.setText(TranslationImpl.generator(`Base: ${this.getTypeName(baseType)} (${items.length} available)`));
         label.style.set("font-weight", "bold");
         labelRow.append(label);
 
@@ -1156,15 +1221,13 @@ export default class BetterCraftingPanel extends Component {
 
         const itemsContainer = this.createItemsContainer();
         section.append(itemsContainer);
-
-        const items = this.findMatchingItems(baseType);
         if (items.length === 0) {
             this.appendMissing(itemsContainer);
         } else {
             for (const item of items) this.addItemRow(itemsContainer, -1, item, 1);
         }
         this.updateCounter(-1, 1);
-        this.scrollContent.append(section);
+        this.normalScrollInner.append(section);
     }
 
     private addComponentSection(index: number, component: IRecipeComponent) {
@@ -1173,10 +1236,11 @@ export default class BetterCraftingPanel extends Component {
         const maxSelect = component.requiredAmount;
         const labelRow  = this.createLabelRow();
 
+        const items = this.findMatchingItems(component.type);
         const label = new Text();
         label.classes.add("better-crafting-heading");
         label.setText(TranslationImpl.generator(
-            `${this.getTypeName(component.type)} \u00d7${maxSelect}${consumed ? " (consumed)" : " (tool)"}`
+            `${this.getTypeName(component.type)} \u00d7${maxSelect}${consumed ? " (consumed)" : " (tool)"} (${items.length} available)`
         ));
         label.style.set("font-weight", "bold");
         labelRow.append(label);
@@ -1192,24 +1256,65 @@ export default class BetterCraftingPanel extends Component {
 
         const itemsContainer = this.createItemsContainer();
         section.append(itemsContainer);
-
-        const items = this.findMatchingItems(component.type);
         if (items.length === 0) {
             this.appendMissing(itemsContainer);
         } else {
             for (const item of items) this.addItemRow(itemsContainer, index, item, maxSelect);
         }
         this.updateCounter(index, maxSelect);
-        this.scrollContent.append(section);
+        this.normalScrollInner.append(section);
     }
 
     // ── UI helpers ────────────────────────────────────────────────────────────
 
+    /** Flex-shrink-0 container that holds the output card and other static header content. */
+    private createStaticContentContainer(): Component {
+        const c = new Component();
+        c.style.set("display", "flex");
+        c.style.set("flex-wrap", "wrap");
+        c.style.set("gap", "8px");
+        c.style.set("align-items", "flex-start");
+        c.style.set("flex", "0 0 auto");
+        c.style.set("min-height", "0");
+        return c;
+    }
+
+    /**
+     * Creates a scroll viewport + flex-wrap inner container pair.
+     * The viewport fills remaining flex space and scrolls; the inner container
+     * uses min-height:100% so align-content:stretch distributes section height.
+     */
+    private createScrollPort(): [viewport: Component, inner: Component] {
+        const viewport = new Component();
+        viewport.style.set("display", "block");
+        viewport.style.set("flex", "1 1 0");
+        viewport.style.set("min-height", "0");
+        viewport.style.set("overflow-y", "auto");
+        viewport.style.set("overflow-x", "hidden");
+        viewport.style.set("scrollbar-width", "thin");
+        viewport.style.set("scrollbar-color", "#888888 rgba(0,0,0,0.3)");
+
+        const inner = new Component();
+        inner.style.set("display", "flex");
+        inner.style.set("flex-wrap", "wrap");
+        inner.style.set("gap", "8px");
+        inner.style.set("align-items", "stretch");
+        inner.style.set("align-content", "stretch");
+        inner.style.set("min-height", "100%");
+        viewport.append(inner);
+
+        return [viewport, inner];
+    }
+
     private createSection(): Component {
         const section = new Component();
-        section.style.set("flex", "1 1 290px");
+        section.classes.add("better-crafting-section");
+        section.style.set("display", "flex");
+        section.style.set("flex-direction", "column");
+        section.style.set("min-height", "0");
+        section.style.set("flex", "1 1 320px");
         section.style.set("min-width", "290px");
-        section.style.set("max-width", "calc(50% - 4px)");
+        section.style.set("max-width", "420px");
         section.style.set("box-sizing", "border-box");
         section.style.set("padding", "6px 8px");
         section.style.set("border", "1px solid var(--color-border, #554433)");
@@ -1220,6 +1325,7 @@ export default class BetterCraftingPanel extends Component {
     private createLabelRow(): Component {
         const row = new Component();
         row.style.set("display", "flex");
+        row.style.set("flex-shrink", "0");
         row.style.set("justify-content", "space-between");
         row.style.set("align-items", "center");
         row.style.set("margin-bottom", "4px");
@@ -1227,13 +1333,12 @@ export default class BetterCraftingPanel extends Component {
         return row;
     }
 
-    private createItemsContainer(target: HTMLElement[] = this._itemContainerEls): Component {
+    private createItemsContainer(): Component {
         const container = new Component();
         container.classes.add("better-crafting-item-list");
-        container.style.set("max-height", `${ROW_HEIGHT_PX * MAX_VISIBLE_ROWS}px`);
+        container.style.set("flex", "1 1 0");
         container.style.set("overflow-y", "auto");
-        container.style.set("overflow-x", "hidden");
-        target.push(container.element);
+        container.style.set("min-height", "0");
         return container;
     }
 
@@ -1250,39 +1355,6 @@ export default class BetterCraftingPanel extends Component {
         missing.style.set("color", "#cc4444");
         missing.style.set("font-style", "italic");
         parent.append(missing);
-    }
-
-    // ── Dynamic item list heights ─────────────────────────────────────────────
-
-    private _updateItemListHeights(): void {
-        const isBulk = this.activeTab === "bulk";
-        const containerEls  = isBulk ? this._bulkItemContainerEls : this._itemContainerEls;
-        const bodyEl        = isBulk ? this._bulkBodyEl            : this._bodyEl;
-        const outputCardEl  = isBulk ? this._bulkOutputCardEl      : this._outputCardEl;
-
-        const n = containerEls.length;
-        if (n === 0 || !this.element || !bodyEl) return;
-
-        const panelH = this.element.getBoundingClientRect().height;
-        if (panelH < 10) return;
-
-        const FOOTER_AND_PADDING = 68;
-        const TAB_BAR_H          = 34;
-        const GAP                = 8;
-        const SECTION_LABEL_H    = 38;
-        const SECTION_BORDER_PAD = 14;
-
-        const infoCardH    = outputCardEl ? outputCardEl.getBoundingClientRect().height : 0;
-        const infoCardTotal = infoCardH > 0 ? infoCardH + GAP : 0;
-        const bodyH        = panelH - FOOTER_AND_PADDING - TAB_BAR_H - infoCardTotal;
-
-        const numGridRows  = Math.ceil(n / 2);
-        const perGridRow   = Math.floor((bodyH - Math.max(0, numGridRows - 1) * GAP) / numGridRows);
-        const listMaxH     = Math.max(ROW_HEIGHT_PX, perGridRow - SECTION_LABEL_H - SECTION_BORDER_PAD);
-
-        for (const el of containerEls) {
-            el.style.maxHeight = `${listMaxH}px`;
-        }
     }
 
     // ── Item row ──────────────────────────────────────────────────────────────
@@ -1417,15 +1489,14 @@ export default class BetterCraftingPanel extends Component {
      */
     private buildBulkContent(): void {
         this._bulkContentDirty = false;
-        this._bulkItemContainerEls = [];
-        this._bulkOutputCardEl = null;
-        this.bulkScrollContent.dump();
+        this.bulkStaticContent.dump();
+        this.bulkScrollInner.dump();
 
         if (!this.recipe) {
             const noRecipe = new Text();
             noRecipe.setText(TranslationImpl.generator("No recipe found for this item."));
             noRecipe.style.set("color", "#ff6666");
-            this.bulkScrollContent.append(noRecipe);
+            this.bulkScrollInner.append(noRecipe);
             this.updateBulkCraftBtnState();
             return;
         }
@@ -1441,7 +1512,7 @@ export default class BetterCraftingPanel extends Component {
         this.addBulkHelpBox();
         this.addBulkMaterialsHeader();
 
-        if (this.recipe.baseComponent !== undefined) {
+        if (this.recipe!.baseComponent !== undefined) {
             this.addBulkComponentSection(-1, this.recipe.baseComponent, 1, false);
         }
         for (let i = 0; i < this.recipe.components.length; i++) {
@@ -1453,7 +1524,6 @@ export default class BetterCraftingPanel extends Component {
         if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = "1";
         this.updateBulkMaxDisplay();
         this.updateBulkCraftBtnState();
-        this._updateItemListHeights();
     }
 
     /**
@@ -1486,7 +1556,7 @@ export default class BetterCraftingPanel extends Component {
         // Wrap in a full-width flex item so the grid doesn't collapse it.
         const container = this.makeFullWidthWrapper();
         container.element.appendChild(wrapper);
-        this.bulkScrollContent.append(container);
+        this.bulkStaticContent.append(container);
     }
 
     /**
@@ -1500,7 +1570,7 @@ export default class BetterCraftingPanel extends Component {
 
         const container = this.makeFullWidthWrapper();
         container.element.appendChild(el);
-        this.bulkScrollContent.append(container);
+        this.bulkStaticContent.append(container);
     }
 
     private addBulkComponentSection(
@@ -1517,17 +1587,16 @@ export default class BetterCraftingPanel extends Component {
         const label = new Text();
         label.classes.add("better-crafting-heading");
         const prefix = slotIndex === -1 ? "Base: " : "";
+        const items = this.findMatchingItems(type);
         label.setText(TranslationImpl.generator(
-            `${prefix}${this.getTypeName(type)} \u00d7${requiredAmount}${consumed ? " (consumed)" : " (tool)"}`
+            `${prefix}${this.getTypeName(type)} \u00d7${requiredAmount}${consumed ? " (consumed)" : " (tool)"} (${items.length} available)`
         ));
         label.style.set("font-weight", "bold");
         labelRow.append(label);
         section.append(labelRow);
 
-        const itemsContainer = this.createItemsContainer(this._bulkItemContainerEls);
+        const itemsContainer = this.createItemsContainer();
         section.append(itemsContainer);
-
-        const items = this.findMatchingItems(type);
         if (items.length === 0) {
             this.appendMissing(itemsContainer);
         } else {
@@ -1539,7 +1608,7 @@ export default class BetterCraftingPanel extends Component {
             }
         }
 
-        this.bulkScrollContent.append(section);
+        this.bulkScrollInner.append(section);
     }
 
     private addBulkItemRow(parent: Component, slotIndex: number, item: Item): void {
@@ -1668,18 +1737,33 @@ export default class BetterCraftingPanel extends Component {
             ? Number.MAX_SAFE_INTEGER
             : staminaCost > 0 ? Math.floor(currentStamina / staminaCost) : 9999;
 
-        let materialMax = 9999;
+        let materialMax = 0;
+        const excludedIds = this.getBulkExcludedIds();
+        const permanentlyConsumedIds = new Set<number>();
+
+        for (let i = 0; i < 9999; i++) {
+            const selection = this.resolveBulkCraftSelection(this.itemType as ItemType, excludedIds, permanentlyConsumedIds);
+            if (!selection) break;
+
+            for (const id of selection.permanentlyConsumedIds) {
+                permanentlyConsumedIds.add(id);
+            }
+
+            materialMax++;
+        }
+
+        return { staminaMax, materialMax };
 
         // Base component (slot -1) — always consumed
-        if (this.recipe.baseComponent !== undefined) {
+        if (this.recipe!.baseComponent !== undefined) {
             const excluded = this.bulkExcludedIds.get(-1) ?? new Set<number>();
-            const available = this.findMatchingItems(this.recipe.baseComponent)
+            const available = this.findMatchingItems(this.recipe!.baseComponent!)
                 .filter(item => !excluded.has(getItemId(item)));
             materialMax = Math.min(materialMax, available.length);
         }
 
-        for (let i = 0; i < this.recipe.components.length; i++) {
-            const comp = this.recipe.components[i];
+        for (let i = 0; i < this.recipe!.components.length; i++) {
+            const comp = this.recipe!.components[i];
             if (comp.consumedAmount <= 0) continue; // tool — not consumed
             const excluded = this.bulkExcludedIds.get(i) ?? new Set<number>();
             const available = this.findMatchingItems(comp.type)
@@ -1755,11 +1839,7 @@ export default class BetterCraftingPanel extends Component {
         const max = this.computeBulkMax();
         if (max <= 0 || this.bulkQuantity < 1) return;
 
-        // Flatten all exclusion sets into a single set of item IDs.
-        const flatExcluded = new Set<number>();
-        for (const [, excludedSet] of this.bulkExcludedIds) {
-            for (const id of excludedSet) flatExcluded.add(id);
-        }
+        const flatExcluded = this.getBulkExcludedIds();
 
         this.bulkCrafting = true;
         try {
@@ -1788,42 +1868,101 @@ export default class BetterCraftingPanel extends Component {
     public resolveForBulkCraft(
         itemType: ItemType,
         excludedIds: Set<number>,
+        sessionConsumedIds?: ReadonlySet<number>,
     ): { tools: Item[]; consumed: Item[]; base: Item | undefined } | null {
-        const recipe = itemDescriptions[itemType]?.recipe;
-        if (!recipe) return null;
+        // Merge user-excluded IDs with items already consumed this bulk session
+        // to prevent re-picking items the game engine hasn't physically removed yet.
+        const effectiveExcluded = sessionConsumedIds?.size
+            ? new Set([...excludedIds, ...sessionConsumedIds])
+            : excludedIds;
+        const selection = this.resolveBulkCraftSelection(itemType, effectiveExcluded);
+        if (!selection) return null;
 
-        const tools: Item[]    = [];
-        const consumed: Item[] = [];
-        let base: Item | undefined;
-
-        // Resolve base component.
-        if (recipe.baseComponent !== undefined) {
-            const candidates = this.findMatchingItems(recipe.baseComponent)
-                .filter(item => !excludedIds.has(getItemId(item)) && !isItemProtected(item));
-            if (candidates.length === 0) return null;
-            base = candidates[0];
-        }
-
-        // Resolve each ingredient slot.
-        for (let i = 0; i < recipe.components.length; i++) {
-            const comp = recipe.components[i];
-            const candidates = this.findMatchingItems(comp.type)
-                .filter(item => !excludedIds.has(getItemId(item)) && !isItemProtected(item));
-
-            if (candidates.length < comp.requiredAmount) return null;
-
-            const picked = candidates.slice(0, comp.requiredAmount);
-            if (comp.consumedAmount > 0) {
-                consumed.push(...picked);
-            } else {
-                tools.push(...picked);
-            }
-        }
-
-        return { tools, consumed, base };
+        return {
+            tools: selection.tools,
+            consumed: selection.consumed,
+            base: selection.base,
+        };
     }
 
     // ── Custom Tooltip (Task 1) ───────────────────────────────────────────────
+
+    private getBulkExcludedIds(): Set<number> {
+        const excludedIds = new Set<number>();
+        for (const [, excludedSet] of this.bulkExcludedIds) {
+            for (const id of excludedSet) excludedIds.add(id);
+        }
+
+        return excludedIds;
+    }
+
+    private resolveBulkCraftSelection(
+        itemType: ItemType,
+        excludedIds: ReadonlySet<number>,
+        permanentlyConsumedIds: ReadonlySet<number> = new Set<number>(),
+    ): IBulkCraftSelection | null {
+        const recipe = itemDescriptions[itemType]?.recipe;
+        if (!recipe) return null;
+
+        const tools: Item[] = [];
+        const consumed: Item[] = [];
+        const reservedIds = new Set<number>(permanentlyConsumedIds);
+        const newlyConsumedIds = new Set<number>();
+        let base: Item | undefined;
+
+        const reserveItem = (item: Item, permanentlyConsumed: boolean): boolean => {
+            const itemId = getItemId(item);
+            if (reservedIds.has(itemId)) return false;
+
+            reservedIds.add(itemId);
+            if (permanentlyConsumed) newlyConsumedIds.add(itemId);
+            return true;
+        };
+
+        if (recipe.baseComponent !== undefined) {
+            const candidates = this.findBulkCandidates(recipe.baseComponent, excludedIds, reservedIds);
+            if (candidates.length === 0) return null;
+
+            base = candidates[0];
+            if (!reserveItem(base, true)) return null;
+        }
+
+        for (const comp of recipe.components) {
+            const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds);
+            if (candidates.length < comp.requiredAmount) return null;
+
+            const picked = candidates.slice(0, comp.requiredAmount);
+            // Only the first consumedAmount items are permanently destroyed; the
+            // remainder fills the requiredAmount but is returned (tool role).
+            const consumedCount = Math.min(comp.consumedAmount, comp.requiredAmount);
+            for (let j = 0; j < picked.length; j++) {
+                if (!reserveItem(picked[j], j < consumedCount)) return null;
+            }
+
+            consumed.push(...picked.slice(0, consumedCount));
+            tools.push(...picked.slice(consumedCount));
+        }
+
+        return {
+            tools,
+            consumed,
+            base,
+            permanentlyConsumedIds: newlyConsumedIds,
+        };
+    }
+
+    private findBulkCandidates(
+        type: ItemType | ItemTypeGroup,
+        excludedIds: ReadonlySet<number>,
+        reservedIds: ReadonlySet<number>,
+    ): Item[] {
+        return this.findMatchingItems(type).filter(item => {
+            const itemId = getItemId(item);
+            return !excludedIds.has(itemId)
+                && !reservedIds.has(itemId)
+                && !isItemProtected(item);
+        });
+    }
 
     private bcGetOrCreateTooltip(): HTMLDivElement {
         if (!this.bcTooltipEl) {
@@ -2200,7 +2339,7 @@ export default class BetterCraftingPanel extends Component {
         this.validationMsg.style.set("margin-top", "4px");
         this.validationMsg.style.set("border-left", "3px solid #ff4444");
         this.validationMsg.style.set("background", "rgba(255,68,68,0.08)");
-        this.scrollContent.append(this.validationMsg);
+        this.normalScrollInner.append(this.validationMsg);
         setTimeout(() => { this.validationMsg?.remove(); this.validationMsg = undefined; }, 3000);
     }
 }
