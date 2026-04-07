@@ -16,6 +16,19 @@ import type { IStat } from "@wayward/game/game/entity/IStats";
 import type { IStatChangeInfo } from "@wayward/game/game/entity/IEntity";
 import type Tile from "@wayward/game/game/tile/Tile";
 import { Quality } from "@wayward/game/game/IObject";
+import TabMods from "@wayward/game/ui/screen/screens/menu/menus/options/TabMods";
+import ChoiceList, { Choice } from "@wayward/game/ui/component/ChoiceList";
+import { CheckButton } from "@wayward/game/ui/component/CheckButton";
+import TranslationImpl from "@wayward/game/language/impl/TranslationImpl";
+
+type ActivationMode = "holdHotkeyToBypass" | "holdHotkeyToAccess";
+type ActivationHotkey = "Shift" | "Control" | "Alt";
+
+interface IBetterCraftingGlobalData {
+    activationMode: ActivationMode;
+    activationHotkey: ActivationHotkey;
+    unsafeBulkCrafting: boolean;
+}
 
 interface IInventorySnapshotEntry {
     item: Item;
@@ -28,9 +41,18 @@ interface ICraftResultCapture {
     unsubscribe: () => void;
 }
 
+const DEFAULT_SETTINGS: Readonly<IBetterCraftingGlobalData> = {
+    activationMode: "holdHotkeyToBypass",
+    activationHotkey: "Shift",
+    unsafeBulkCrafting: false,
+};
+
 export default class BetterCrafting extends Mod {
     @Mod.instance<BetterCrafting>()
     public static readonly INSTANCE: BetterCrafting;
+
+    @Mod.globalData<BetterCrafting>()
+    public globalData!: IBetterCraftingGlobalData;
 
     public panel?: BetterCraftingPanel;
 
@@ -46,7 +68,82 @@ export default class BetterCrafting extends Mod {
 
     // ── Mod lifecycle ─────────────────────────────────────────────────────────
 
-    public override onInitialize(): void {}
+    public override initializeGlobalData(data: unknown): IBetterCraftingGlobalData {
+        return this.normalizeSettings(data);
+    }
+
+    public override onInitialize(): void {
+        this.clearHeldHotkeyState();
+
+        TabMods.registerModOptions(this.mod, component => {
+            const container = component.element;
+            container.replaceChildren();
+
+            const title = document.createElement("h3");
+            title.textContent = "Better Crafting Settings";
+            container.appendChild(title);
+
+            const intro = document.createElement("p");
+            intro.textContent = "Configure the Better Crafting hotkey behavior and bulk crafting safety.";
+            container.appendChild(intro);
+
+            const activationLabel = document.createElement("div");
+            activationLabel.textContent = "Activation Mode";
+            activationLabel.style.marginBottom = "6px";
+            container.appendChild(activationLabel);
+
+            const activationChoices = new ChoiceList<Choice<ActivationMode>>();
+            const bypassChoice = new Choice<ActivationMode>("holdHotkeyToBypass");
+            bypassChoice.setText(TranslationImpl.generator("Hold Hotkey to Bypass"));
+            const accessChoice = new Choice<ActivationMode>("holdHotkeyToAccess");
+            accessChoice.setText(TranslationImpl.generator("Hold Hotkey to Access"));
+            activationChoices.setChoices(bypassChoice, accessChoice);
+            activationChoices.event.subscribe("choose", (_: unknown, choice?: Choice<ActivationMode>) => {
+                if (!choice) return;
+                this.globalData.activationMode = choice.id;
+                this.clearHeldHotkeyState();
+            });
+            activationChoices.setRefreshMethod(() => activationChoices.get(this.settings.activationMode)!);
+            activationChoices.refresh();
+            container.appendChild(activationChoices.element);
+
+            const hotkeyLabel = document.createElement("div");
+            hotkeyLabel.textContent = "Activation Hotkey";
+            hotkeyLabel.style.marginTop = "12px";
+            hotkeyLabel.style.marginBottom = "6px";
+            container.appendChild(hotkeyLabel);
+
+            const hotkeyChoices = new ChoiceList<Choice<ActivationHotkey>>();
+            const shiftChoice = new Choice<ActivationHotkey>("Shift");
+            shiftChoice.setText(TranslationImpl.generator("Shift"));
+            const controlChoice = new Choice<ActivationHotkey>("Control");
+            controlChoice.setText(TranslationImpl.generator("Control"));
+            const altChoice = new Choice<ActivationHotkey>("Alt");
+            altChoice.setText(TranslationImpl.generator("Alt"));
+            hotkeyChoices.setChoices(shiftChoice, controlChoice, altChoice);
+            hotkeyChoices.event.subscribe("choose", (_: unknown, choice?: Choice<ActivationHotkey>) => {
+                if (!choice) return;
+                this.globalData.activationHotkey = choice.id;
+                this.clearHeldHotkeyState();
+            });
+            hotkeyChoices.setRefreshMethod(() => hotkeyChoices.get(this.settings.activationHotkey)!);
+            hotkeyChoices.refresh();
+            container.appendChild(hotkeyChoices.element);
+
+            const unsafeToggle = new CheckButton();
+            unsafeToggle.setText(TranslationImpl.generator("Unsafe Bulk Crafting"));
+            unsafeToggle.addDescription(paragraph => {
+                paragraph.setText(TranslationImpl.generator("Ignore stamina limits for bulk quantity and only stop when health gets critically low."));
+            });
+            unsafeToggle.event.subscribe("toggle", (_: unknown, checked: boolean) => {
+                this.globalData.unsafeBulkCrafting = checked;
+            });
+            unsafeToggle.setRefreshMethod(() => this.settings.unsafeBulkCrafting);
+            unsafeToggle.refresh();
+            unsafeToggle.style.set("margin-top", "12px");
+            container.appendChild(unsafeToggle.element);
+        });
+    }
 
     public override onLoad(): void {
         document.addEventListener("keydown", this.onKeyDown);
@@ -58,22 +155,79 @@ export default class BetterCrafting extends Mod {
         document.removeEventListener("keydown", this.onKeyDown);
         document.removeEventListener("keyup", this.onKeyUp);
         window.removeEventListener("blur", this.onBlur);
+        this.clearHeldHotkeyState();
         this.panel?.hidePanel();
         this.panel?.destroyListeners();
         this.panel?.remove();
         this.panel = undefined;
     }
 
+    private get settings(): IBetterCraftingGlobalData {
+        return this.globalData ?? DEFAULT_SETTINGS;
+    }
+
+    private normalizeSettings(data: unknown): IBetterCraftingGlobalData {
+        const source = data && typeof data === "object" ? data as Partial<IBetterCraftingGlobalData> : {};
+
+        return {
+            activationMode: source.activationMode === "holdHotkeyToAccess" || source.activationMode === "holdHotkeyToBypass"
+                ? source.activationMode
+                : DEFAULT_SETTINGS.activationMode,
+            activationHotkey: source.activationHotkey === "Shift" || source.activationHotkey === "Control" || source.activationHotkey === "Alt"
+                ? source.activationHotkey
+                : DEFAULT_SETTINGS.activationHotkey,
+            unsafeBulkCrafting: typeof source.unsafeBulkCrafting === "boolean"
+                ? source.unsafeBulkCrafting
+                : DEFAULT_SETTINGS.unsafeBulkCrafting,
+        };
+    }
+
+    private clearHeldHotkeyState(): void {
+        this.shiftHeld = false;
+    }
+
+    private isConfiguredHotkey(key: string): boolean {
+        return key === this.settings.activationHotkey;
+    }
+
+    private isActivationHotkeyHeld(): boolean {
+        return this.shiftHeld;
+    }
+
+    private shouldOpenBetterCrafting(): boolean {
+        if (this.bypassIntercept) return false;
+
+        return this.settings.activationMode === "holdHotkeyToBypass"
+            ? !this.isActivationHotkeyHeld()
+            : this.isActivationHotkeyHeld();
+    }
+
+    private shouldAbortForHealthLoss(stat: IStat, oldValue: number): boolean {
+        if (stat.type !== Stat.Health || (stat.value ?? 0) >= oldValue) return false;
+        if (!this.settings.unsafeBulkCrafting) return true;
+
+        try {
+            const maxHealth = localPlayer?.getMaxHealth?.(true) ?? stat.max;
+            if (typeof maxHealth !== "number" || !Number.isFinite(maxHealth) || maxHealth <= 0) {
+                return true;
+            }
+
+            return stat.value < maxHealth * 0.1;
+        } catch {
+            return true;
+        }
+    }
+
     private onKeyDown = (e: KeyboardEvent) => {
-        if (e.key === "Shift") this.shiftHeld = true;
+        if (this.isConfiguredHotkey(e.key)) this.shiftHeld = true;
     };
 
     private onKeyUp = (e: KeyboardEvent) => {
-        if (e.key === "Shift") this.shiftHeld = false;
+        if (this.isConfiguredHotkey(e.key)) this.shiftHeld = false;
     };
 
     private onBlur = () => {
-        this.shiftHeld = false;
+        this.clearHeldHotkeyState();
     };
 
     // ── Panel management ──────────────────────────────────────────────────────
@@ -89,6 +243,7 @@ export default class BetterCrafting extends Mod {
                     async (itemType, quantity, excludedIds) => {
                         await this.executeBulkCraft(itemType, quantity, excludedIds);
                     },
+                    () => this.settings,
                 );
                 gameScreen.append(this.panel);
             }
@@ -118,8 +273,8 @@ export default class BetterCrafting extends Mod {
             }
         };
 
-        const onAdd = (items: Item[]) => pushCandidates(items);
-        const onUpdate = (items: Item[]) => pushCandidates(items);
+        const onAdd = (_: unknown, items: Item[]) => pushCandidates(items);
+        const onUpdate = (_: unknown, items: Item[]) => pushCandidates(items);
 
         localPlayer.event.subscribe("inventoryItemAdd", onAdd);
         localPlayer.event.subscribe("inventoryItemUpdate", onUpdate);
@@ -289,7 +444,7 @@ export default class BetterCrafting extends Mod {
         };
 
         const statHandler = (_: any, stat: IStat, oldValue: number, _info: IStatChangeInfo) => {
-            if (stat.type === Stat.Health && (stat.value ?? 0) < oldValue) {
+            if (this.shouldAbortForHealthLoss(stat, oldValue)) {
                 this.abortBulkCraft("damage");
             }
         };
@@ -403,8 +558,7 @@ export default class BetterCrafting extends Mod {
         actionApi: IActionHandlerApi<Entity>,
         args: any[],
     ): false | void {
-        if (this.bypassIntercept) return;
-        if (this.shiftHeld) return;
+        if (!this.shouldOpenBetterCrafting()) return;
 
         if (actionType === ActionType.Craft && actionApi.executor === localPlayer) {
             const itemType = args[0] as number;

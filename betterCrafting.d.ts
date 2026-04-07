@@ -3,20 +3,42 @@ import BetterCraftingPanel from './src/BetterCraftingDialog';
 import { ActionType } from "@wayward/game/game/entity/action/IAction";
 import type { IActionHandlerApi } from "@wayward/game/game/entity/action/IAction";
 import type Entity from "@wayward/game/game/entity/Entity";
+type ActivationMode = "holdHotkeyToBypass" | "holdHotkeyToAccess";
+type ActivationHotkey = "Shift" | "Control" | "Alt";
+interface IBetterCraftingGlobalData {
+    activationMode: ActivationMode;
+    activationHotkey: ActivationHotkey;
+    unsafeBulkCrafting: boolean;
+}
 export default class BetterCrafting extends Mod {
     static readonly INSTANCE: BetterCrafting;
+    globalData: IBetterCraftingGlobalData;
     panel?: BetterCraftingPanel;
     bypassIntercept: boolean;
     private shiftHeld;
     private isBulkCrafting;
     private bulkAbortController;
+    initializeGlobalData(data: unknown): IBetterCraftingGlobalData;
     onInitialize(): void;
     onLoad(): void;
     onUnload(): void;
+    private get settings();
+    private normalizeSettings;
+    private clearHeldHotkeyState;
+    private isConfiguredHotkey;
+    private isActivationHotkeyHeld;
+    private shouldOpenBetterCrafting;
+    private shouldAbortForHealthLoss;
     private onKeyDown;
     private onKeyUp;
     private onBlur;
     private ensurePanel;
+    private snapshotInventory;
+    private beginCraftResultCapture;
+    private finishCraftResultCapture;
+    private resolveCraftResultItem;
+    private getItemId;
+    private getItemSignature;
     private executeCraft;
     private waitForTurnEnd;
     private abortBulkCraft;
@@ -24,3 +46,4 @@ export default class BetterCrafting extends Mod {
     private executeBulkCraft;
     onPreExecuteAction(host: any, actionType: ActionType, actionApi: IActionHandlerApi<Entity>, args: any[]): false | void;
 }
+export {};

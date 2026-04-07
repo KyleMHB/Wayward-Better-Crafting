@@ -3,6 +3,17 @@ import { ItemType, RecipeLevel } from "@wayward/game/game/item/IItem";
 import type Item from "@wayward/game/game/item/Item";
 type CraftCallback = (itemType: ItemType, tools: Item[] | undefined, consumed: Item[] | undefined, base: Item | undefined) => Promise<void>;
 type BulkCraftCallback = (itemType: ItemType, quantity: number, excludedIds: Set<number>) => Promise<void>;
+export interface IBetterCraftingSettings {
+    activationMode: "holdHotkeyToBypass" | "holdHotkeyToAccess";
+    activationHotkey: "Shift" | "Control" | "Alt";
+    unsafeBulkCrafting: boolean;
+}
+type SettingsAccessor = () => IBetterCraftingSettings;
+export interface ICraftDisplayResult {
+    success: boolean;
+    item?: Item;
+    itemType: ItemType;
+}
 export declare const STAMINA_COST_PER_LEVEL: Partial<Record<RecipeLevel, number>>;
 export default class BetterCraftingPanel extends Component {
     itemType: number;
@@ -10,6 +21,7 @@ export default class BetterCraftingPanel extends Component {
     private recipe?;
     private onCraftCallback;
     private onBulkCraftCallback;
+    private getSettings;
     private craftBtn;
     private validationMsg?;
     private selectedItems;
@@ -32,6 +44,8 @@ export default class BetterCraftingPanel extends Component {
     private normalFooter;
     private bulkBody;
     private bulkFooter;
+    private normalResultsEl;
+    private bulkResultsEl;
     private bulkExcludedIds;
     private _lastBulkItemType;
     private bulkQuantity;
@@ -47,10 +61,13 @@ export default class BetterCraftingPanel extends Component {
     private bulkQtyRow;
     private bulkProgressEl;
     private onBulkAbortCallback;
+    private get activationHotkey();
+    private isConfiguredHotkey;
+    private updateActivationHotkeyState;
     private readonly _onShiftDown;
     private readonly _onShiftUp;
     private readonly _onBlur;
-    constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback);
+    constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback, getSettings: SettingsAccessor);
     destroyListeners(): void;
     private switchTab;
     showPanel(): void;
@@ -62,7 +79,7 @@ export default class BetterCraftingPanel extends Component {
     onBulkCraftEnd(): void;
     private updateHighlights;
     private clearHighlights;
-    updateRecipe(itemType: number): void;
+    updateRecipe(itemType: number, clearResults?: boolean): void;
     private getPreSelectedItems;
     private toTitleCase;
     private formatEnumName;
@@ -101,6 +118,16 @@ export default class BetterCraftingPanel extends Component {
     private bcPositionTooltip;
     private bcFillTooltipForItem;
     private bcTooltipDivider;
+    clearResults(): void;
+    showSingleCraftResult(result: ICraftDisplayResult): void;
+    showBulkCraftResults(results: ICraftDisplayResult[]): void;
+    private createResultsContainer;
+    private clearResultsContainer;
+    private syncResultsVisibility;
+    private renderSingleCraftResult;
+    private renderBulkCraftResults;
+    private createResultsTitle;
+    private getDisplayName;
     private getTypeName;
     private findMatchingItems;
     private crafting;

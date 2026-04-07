@@ -21,6 +21,14 @@ import { Stat } from "@wayward/game/game/entity/IStats";
 type CraftCallback = (itemType: ItemType, tools: Item[] | undefined, consumed: Item[] | undefined, base: Item | undefined) => Promise<void>;
 type BulkCraftCallback = (itemType: ItemType, quantity: number, excludedIds: Set<number>) => Promise<void>;
 
+export interface IBetterCraftingSettings {
+    activationMode: "holdHotkeyToBypass" | "holdHotkeyToAccess";
+    activationHotkey: "Shift" | "Control" | "Alt";
+    unsafeBulkCrafting: boolean;
+}
+
+type SettingsAccessor = () => IBetterCraftingSettings;
+
 export interface ICraftDisplayResult {
     success: boolean;
     item?: Item;
@@ -98,6 +106,7 @@ export default class BetterCraftingPanel extends Component {
     private recipe?: IRecipe;
     private onCraftCallback: CraftCallback;
     private onBulkCraftCallback: BulkCraftCallback;
+    private getSettings: SettingsAccessor;
     private craftBtn!: Button;
     private validationMsg?: Text;
 
@@ -151,10 +160,38 @@ export default class BetterCraftingPanel extends Component {
     private bulkProgressEl: HTMLElement | null = null;
     private onBulkAbortCallback: (() => void) | null = null;
 
+    private get activationHotkey(): IBetterCraftingSettings["activationHotkey"] {
+        return this.getSettings().activationHotkey;
+    }
+
+    private isConfiguredHotkey(key: string): boolean {
+        return key === this.activationHotkey;
+    }
+
+    private updateActivationHotkeyState(event?: KeyboardEvent): void {
+        if (!event) {
+            this.shiftHeld = false;
+            return;
+        }
+
+        switch (this.activationHotkey) {
+            case "Control":
+                this.shiftHeld = event.ctrlKey;
+                break;
+            case "Alt":
+                this.shiftHeld = event.altKey;
+                break;
+            case "Shift":
+            default:
+                this.shiftHeld = event.shiftKey;
+                break;
+        }
+    }
+
     // ── Keyboard / window listeners ───────────────────────────────────────────
     private readonly _onShiftDown = (e: KeyboardEvent) => {
-        if (e.key !== "Shift" || this.shiftHeld) return;
-        this.shiftHeld = true;
+        this.updateActivationHotkeyState(e);
+        if (!this.isConfiguredHotkey(e.key) || !this.shiftHeld) return;
         // Show tooltip immediately if mouse is already over a row.
         if (this._hoveredItem) {
             this.bcShowTooltip(this._hoveredItem, this._hoveredDisplayName, this._hoveredMouseX, this._hoveredMouseY);
@@ -162,20 +199,26 @@ export default class BetterCraftingPanel extends Component {
     };
 
     private readonly _onShiftUp = (e: KeyboardEvent) => {
-        if (e.key !== "Shift") return;
-        this.shiftHeld = false;
+        this.updateActivationHotkeyState(e);
+        if (this.isConfiguredHotkey(e.key)) {
+            this.bcHideTooltip();
+            return;
+        }
+
+        if (this.shiftHeld) return;
         this.bcHideTooltip();
     };
 
     private readonly _onBlur = () => {
-        this.shiftHeld = false;
+        this.updateActivationHotkeyState();
         this.bcHideTooltip();
     };
 
-    public constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback) {
+    public constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback, getSettings: SettingsAccessor) {
         super();
         this.onCraftCallback = onCraft;
         this.onBulkCraftCallback = onBulkCraft;
+        this.getSettings = getSettings;
 
         // ── Global styles (injected once) ────────────────────────────────────
         const STYLE_ID = "better-crafting-styles";
@@ -1621,7 +1664,9 @@ export default class BetterCraftingPanel extends Component {
         const staminaCost = STAMINA_COST_PER_LEVEL[this.recipe.level as RecipeLevel] ?? 4;
         const currentStamina: number =
             (localPlayer as any).stat?.get?.(Stat.Stamina)?.value ?? 0;
-        const staminaMax = staminaCost > 0 ? Math.floor(currentStamina / staminaCost) : 9999;
+        const staminaMax = this.getSettings().unsafeBulkCrafting
+            ? Number.MAX_SAFE_INTEGER
+            : staminaCost > 0 ? Math.floor(currentStamina / staminaCost) : 9999;
 
         let materialMax = 9999;
 
@@ -1664,7 +1709,7 @@ export default class BetterCraftingPanel extends Component {
                 this.bulkMaxLabel.textContent = `(max ${max})`;
                 this.bulkMaxLabel.style.color = "#7a6850";
             } else {
-                this.bulkMaxLabel.textContent = (staminaMax === 0 && materialMax > 0)
+                this.bulkMaxLabel.textContent = (!this.getSettings().unsafeBulkCrafting && staminaMax === 0 && materialMax > 0)
                     ? "(insufficient stamina)"
                     : "(not enough materials)";
                 this.bulkMaxLabel.style.color = "#cc4444";
