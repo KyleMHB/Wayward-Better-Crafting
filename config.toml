@@ -2,6 +2,6 @@
 source = "."
 
 [deploy]
-target = "/Users/kylehb/Library/Application Support/Steam/steamapps/common/Wayward/mods/Better Crafting"
+target = "E:/Steam/steamapps/common/Wayward/mods/Better Crafting"
 overwrite = true
 cleanTarget = false

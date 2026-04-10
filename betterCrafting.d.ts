@@ -3,6 +3,7 @@ import BetterCraftingPanel from './src/BetterCraftingDialog';
 import { ActionType } from "@wayward/game/game/entity/action/IAction";
 import type { IActionHandlerApi } from "@wayward/game/game/entity/action/IAction";
 import type Entity from "@wayward/game/game/entity/Entity";
+import { ItemType } from "@wayward/game/game/item/IItem";
 import type { IBetterCraftingRequestStatus, IBulkActionAbortRequest, IBulkCraftRequest, ICraftApprovalResponse, ICraftSelectionRequest, IDismantleRequest } from "./src/multiplayer/BetterCraftingProtocol";
 type ActivationMode = "holdHotkeyToBypass" | "holdHotkeyToAccess";
 type ActivationHotkey = "Shift" | "Control" | "Alt";
@@ -11,6 +12,13 @@ interface IBetterCraftingGlobalData {
     activationHotkey: ActivationHotkey;
     unsafeBulkCrafting: boolean;
     debugLogging: boolean;
+}
+interface IVanillaCraftBypassPermitRequest {
+    requestId: number;
+    itemType: ItemType;
+    requiredItemIds: number[];
+    consumedItemIds: number[];
+    baseItemId?: number;
 }
 export default class BetterCrafting extends Mod {
     static readonly INSTANCE: BetterCrafting;
@@ -23,7 +31,9 @@ export default class BetterCrafting extends Mod {
     private bulkAbortController;
     private nextMultiplayerRequestId;
     private readonly pendingApprovals;
+    private readonly pendingVanillaBypasses;
     private readonly serverCraftPasses;
+    private readonly serverVanillaBypassPermits;
     initializeGlobalData(data: unknown): IBetterCraftingGlobalData;
     onInitialize(): void;
     onLoad(): void;
@@ -43,7 +53,9 @@ export default class BetterCrafting extends Mod {
     private onBlur;
     private consumeLegacyUnsafeCraftingSeed;
     private isRemoteMultiplayerClient;
+    private showMultiplayerMessage;
     private clearPendingApprovals;
+    private clearPendingVanillaBypasses;
     private getTypeDebugName;
     private formatSelectionFailureMessage;
     private logSelectionFailure;
@@ -51,10 +63,20 @@ export default class BetterCrafting extends Mod {
     private requestApproval;
     handleCraftApproval(approval: ICraftApprovalResponse): void;
     private sendApproval;
+    private sendStatus;
     handleMultiplayerStatus(status: IBetterCraftingRequestStatus): void;
     private getPlayerKey;
     private getPlayerFromConnection;
+    private getConnectionForPlayer;
+    private buildCraftArgsSummary;
+    private reportBlockedRemoteCraft;
     abortServerRequest(connection: any, request: IBulkActionAbortRequest): void;
+    processVanillaBypassPermit(connection: any, request: IVanillaCraftBypassPermitRequest): void;
+    private getVanillaCraftActionDetails;
+    private areNumberArraysEqual;
+    private consumeVanillaBypassPermit;
+    private trySendVanillaBypassPermit;
+    private replayApprovedVanillaBypass;
     private consumeServerPass;
     private ensurePanel;
     private findMatchingItems;
@@ -76,6 +98,7 @@ export default class BetterCrafting extends Mod {
     processCraftRequest(connection: any, request: ICraftSelectionRequest): void;
     processBulkCraftRequest(connection: any, request: IBulkCraftRequest): void;
     processDismantleRequest(connection: any, request: IDismantleRequest): void;
+    private isVanillaBypassCraftRequested;
     onPreExecuteAction(host: any, actionType: ActionType, actionApi: IActionHandlerApi<Entity>, args: any[]): false | void;
 }
 export {};

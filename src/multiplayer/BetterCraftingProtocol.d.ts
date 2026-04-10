@@ -1,5 +1,5 @@
 import type { ItemType } from "@wayward/game/game/item/IItem";
-export type BetterCraftingRequestKind = "craft" | "bulkCraft" | "dismantle";
+export type BetterCraftingRequestKind = "craft" | "bulkCraft" | "dismantle" | "vanillaBypass";
 export type BetterCraftingSelectionFailureReason = "missingSelection" | "itemUnavailable" | "itemProtected" | "duplicateSelection" | "baseUnavailable" | "pinnedToolUnavailable";
 export interface ISelectionFailureDetails {
     reason: BetterCraftingSelectionFailureReason;

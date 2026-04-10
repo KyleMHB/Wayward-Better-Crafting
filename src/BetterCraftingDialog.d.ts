@@ -166,6 +166,8 @@ export default class BetterCraftingPanel extends Component {
     private clearSplitSelection;
     private collectCurrentSplitSelectionIds;
     private repairSplitSelection;
+    private reportSelectionUnavailable;
+    private resolveComponentSelection;
     private collectCurrentNormalSelectionIds;
     private toTitleCase;
     private formatEnumName;

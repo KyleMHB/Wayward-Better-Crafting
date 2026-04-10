@@ -1,6 +1,6 @@
 {
     "extends": "./mod-reference/definitions/tsconfig.mod.base.json",
-    "compilerOptions": {       
+    "compilerOptions": {
         "ignoreDeprecations": "5.0",
         "baseUrl": ".",
         "types": ["jquery"],

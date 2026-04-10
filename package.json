@@ -1,5 +1,5 @@
 {
-  "version": "1.7.0",
+  "version": "1.7.1",
   "scripts": {
     "sync:version": "node ./scripts/sync-version.mjs",
     "build": "npm run sync:version && node ./scripts/run-tsc.mjs --build --force --pretty tsconfig.json",

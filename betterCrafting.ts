@@ -33,7 +33,7 @@ import {
     isSplitConsumption,
     partitionSelectedItems,
 } from "./src/craftingSelection";
-import { getItemIdSafe } from "./src/itemIdentity";
+import { getItemIdSafe, getItemIds } from "./src/itemIdentity";
 import type {
     IBetterCraftingRequestStatus,
     IBulkActionAbortRequest,
@@ -69,6 +69,13 @@ interface IPendingApproval {
     timeout: ReturnType<typeof setTimeout>;
 }
 
+interface IPendingVanillaBypass {
+    itemType: ItemType;
+    requiredItems?: Item[];
+    consumedItems?: Item[];
+    baseItem?: Item;
+}
+
 interface IServerCraftPass {
     actionType: ActionType.Craft | ActionType.Dismantle;
     kind: ICraftApprovalResponse["kind"];
@@ -77,6 +84,25 @@ interface IServerCraftPass {
     requestId: number;
     expiresAt: number;
     targetItemIds?: Set<number>;
+}
+
+interface IVanillaCraftBypassPermitRequest {
+    requestId: number;
+    itemType: ItemType;
+    requiredItemIds: number[];
+    consumedItemIds: number[];
+    baseItemId?: number;
+}
+
+interface IServerVanillaCraftBypassPermit extends IVanillaCraftBypassPermitRequest {
+    expiresAt: number;
+}
+
+interface IVanillaCraftActionDetails {
+    itemType: ItemType;
+    requiredItemIds: number[];
+    consumedItemIds: number[];
+    baseItemId?: number;
 }
 
 interface IResolvedCraftSelection {
@@ -103,6 +129,43 @@ interface IPartitionedSelection {
     consumed: Item[];
 }
 
+interface IServerCraftBlockDiagnostics {
+    playerIdentifier?: string;
+    playerKey?: number;
+    actionType: ActionType.Craft | ActionType.Dismantle;
+    itemType?: ItemType;
+    requestId?: number;
+    reason:
+        | "noApprovalRequest"
+        | "approvalGrantedButPassMissing"
+        | "approvalGrantedButPassExpired"
+        | "approvalGrantedButPassMismatch"
+        | "bypassPermitMissing"
+        | "bypassPermitExpired"
+        | "bypassPermitMismatch"
+        | "actionArgsUnserializable"
+        | "dismantlePassMissing";
+    pass?: {
+        kind: ICraftApprovalResponse["kind"];
+        requestId: number;
+        remaining: number;
+        expiresAt: number;
+        itemType: ItemType;
+    };
+    bypassPermit?: {
+        requestId: number;
+        expiresAt: number;
+        itemType: ItemType;
+    };
+    actionDetails?: IVanillaCraftActionDetails;
+    argsSummary?: {
+        itemType?: ItemType;
+        requiredCount: number;
+        consumedCount: number;
+        hasBase: boolean;
+    };
+}
+
 function isItemProtected(item: Item): boolean {
     return (item as any).isProtected === true || (item as any).protected === true;
 }
@@ -113,11 +176,6 @@ function getItemId(item: Item | undefined): number | undefined {
 
 function getQualitySortKey(item: Item): number {
     return (item.quality ?? 0) as number;
-}
-
-function getItemIds(items: readonly Item[] | undefined, getId: (item: Item) => number | undefined): number[] {
-    if (!items) return [];
-    return items.map(item => getId(item)).filter((id): id is number => id !== undefined);
 }
 
 class BetterCraftingStatusPacket extends ClientPacket<void> {
@@ -284,12 +342,39 @@ class BetterCraftingAbortRequestPacket extends ServerPacket {
     }
 }
 
+class BetterCraftingVanillaBypassPermitPacket extends ServerPacket {
+    public request?: IVanillaCraftBypassPermitRequest;
+
+    public getDebugInfo(): string {
+        return `BetterCraftingVanillaBypassPermit:${this.request?.itemType ?? "unknown"}:${this.request?.requestId ?? 0}`;
+    }
+
+    public process(): void {
+        if (this.request) {
+            BetterCrafting.INSTANCE?.processVanillaBypassPermit(this.connection, this.request);
+        }
+    }
+
+    protected override getIndexSize(): number {
+        return 1;
+    }
+
+    protected override writeData(): void {
+        this.writeIndexedObject(this.request);
+    }
+
+    protected override readData(): void {
+        this.request = this.readIndexedObject() as IVanillaCraftBypassPermitRequest | undefined;
+    }
+}
+
 const betterCraftingStatusPacketRegistration = Mod.register.packet(BetterCraftingStatusPacket);
 const betterCraftingApprovalPacketRegistration = Mod.register.packet(BetterCraftingApprovalPacket);
 const betterCraftingCraftRequestPacketRegistration = Mod.register.packet(BetterCraftingCraftRequestPacket);
 const betterCraftingBulkCraftRequestPacketRegistration = Mod.register.packet(BetterCraftingBulkCraftRequestPacket);
 const betterCraftingDismantleRequestPacketRegistration = Mod.register.packet(BetterCraftingDismantleRequestPacket);
 const betterCraftingAbortRequestPacketRegistration = Mod.register.packet(BetterCraftingAbortRequestPacket);
+const betterCraftingVanillaBypassPermitPacketRegistration = Mod.register.packet(BetterCraftingVanillaBypassPermitPacket);
 void [
     betterCraftingStatusPacketRegistration,
     betterCraftingApprovalPacketRegistration,
@@ -297,6 +382,7 @@ void [
     betterCraftingBulkCraftRequestPacketRegistration,
     betterCraftingDismantleRequestPacketRegistration,
     betterCraftingAbortRequestPacketRegistration,
+    betterCraftingVanillaBypassPermitPacketRegistration,
 ];
 
 export default class BetterCrafting extends Mod {
@@ -320,8 +406,11 @@ export default class BetterCrafting extends Mod {
     } | null = null;
     private nextMultiplayerRequestId = 1;
     private readonly pendingApprovals = new Map<number, IPendingApproval>();
+    private readonly pendingVanillaBypasses = new Map<number, IPendingVanillaBypass>();
     /** Server-side: tracks granted action passes per player (keyed by player ID). */
     private readonly serverCraftPasses = new Map<number, IServerCraftPass>();
+    /** Server-side: tracks one-shot vanilla bypass craft permits per player. */
+    private readonly serverVanillaBypassPermits = new Map<number, IServerVanillaCraftBypassPermit>();
 
     // ── Mod lifecycle ─────────────────────────────────────────────────────────
 
@@ -442,7 +531,9 @@ export default class BetterCrafting extends Mod {
         window.removeEventListener("blur", this.onBlur);
         this.clearHeldHotkeyState();
         this.clearPendingApprovals();
+        this.clearPendingVanillaBypasses("mod_unload");
         this.serverCraftPasses.clear();
+        this.serverVanillaBypassPermits.clear();
         this.panel?.hidePanel();
         this.panel?.destroyListeners();
         this.panel?.remove();
@@ -500,7 +591,7 @@ export default class BetterCrafting extends Mod {
         return true;
     }
 
-    private getItemId(item: Item): number | undefined {
+    private getItemId(item: Item | undefined): number | undefined {
         return getItemIdSafe(item);
     }
 
@@ -539,6 +630,10 @@ export default class BetterCrafting extends Mod {
         return multiplayer?.isConnected === true && multiplayer.isClient;
     }
 
+    private showMultiplayerMessage(message: string): void {
+        this.panel?.showMultiplayerMessage(message);
+    }
+
     private clearPendingApprovals(message?: string): void {
         for (const [requestId, pending] of this.pendingApprovals) {
             clearTimeout(pending.timeout);
@@ -547,9 +642,20 @@ export default class BetterCrafting extends Mod {
         }
 
         this.pendingApprovals.clear();
+        this.clearPendingVanillaBypasses("approval_clear");
         if (message) {
-            this.panel?.showMultiplayerMessage(message);
+            this.showMultiplayerMessage(message);
         }
+    }
+
+    private clearPendingVanillaBypasses(reason: string): void {
+        if (this.pendingVanillaBypasses.size === 0) return;
+
+        for (const requestId of this.pendingVanillaBypasses.keys()) {
+            this.debugLog(`Cleared pending vanilla bypass ${requestId}.`, { requestId, reason });
+        }
+
+        this.pendingVanillaBypasses.clear();
     }
 
     private getTypeDebugName(type: ItemType | ItemTypeGroup | number | undefined): string {
@@ -621,7 +727,7 @@ export default class BetterCrafting extends Mod {
 
                 this.pendingApprovals.delete(requestId);
                 this.debugLog(`Approval request ${requestId} timed out.`);
-                this.panel?.showMultiplayerMessage("The server did not respond in time. Please try again.");
+                this.showMultiplayerMessage("The server did not respond in time. Please try again.");
                 resolve(false);
             }, 10_000);
 
@@ -640,7 +746,7 @@ export default class BetterCrafting extends Mod {
                 clearTimeout(pending.timeout);
                 this.pendingApprovals.delete(requestId);
                 this.debugLog(`Approval request ${requestId} failed before dispatch.`, error);
-                this.panel?.showMultiplayerMessage("Your selection changed. Please reselect the items and try again.");
+                this.showMultiplayerMessage("Your selection changed. Please reselect the items and try again.");
                 pending.resolve(false);
             }
 
@@ -653,7 +759,7 @@ export default class BetterCrafting extends Mod {
                 clearTimeout(pending.timeout);
                 this.pendingApprovals.delete(requestId);
                 this.debugLog(`Approval request ${requestId} was not dispatched.`);
-                this.panel?.showMultiplayerMessage("Your selection changed. Please reselect the items and try again.");
+                this.showMultiplayerMessage("Your selection changed. Please reselect the items and try again.");
                 pending.resolve(false);
             }
         } else {
@@ -675,26 +781,62 @@ export default class BetterCrafting extends Mod {
         }
 
         if (!approval.approved && approval.message) {
-            this.panel?.showMultiplayerMessage(approval.message);
+            this.showMultiplayerMessage(approval.message);
         }
 
         pending.resolve(approval.approved);
+
+        if (!approval.approved) {
+            if (this.pendingVanillaBypasses.delete(approval.requestId)) {
+                this.debugLog(`Rejected pending vanilla bypass ${approval.requestId}.`, approval);
+            }
+            return;
+        }
+
+        if (approval.kind === "vanillaBypass") {
+            const pendingBypass = this.pendingVanillaBypasses.get(approval.requestId);
+            if (!pendingBypass) {
+                this.debugLog(`Approved vanilla bypass ${approval.requestId} without a queued replay.`, approval);
+                return;
+            }
+
+            this.pendingVanillaBypasses.delete(approval.requestId);
+            this.debugLog(`Replaying approved vanilla bypass ${approval.requestId}.`, {
+                requestId: approval.requestId,
+                itemType: pendingBypass.itemType,
+                requiredIds: getItemIds(pendingBypass.requiredItems, item => this.getItemId(item)),
+                consumedIds: getItemIds(pendingBypass.consumedItems, item => this.getItemId(item)),
+                baseId: this.getItemId(pendingBypass.baseItem),
+            });
+
+            void this.replayApprovedVanillaBypass(pendingBypass, approval.requestId);
+        }
     }
 
     /** Server-side: sends a craft approval/rejection response to the client. */
     private sendApproval(to: any, approval: ICraftApprovalResponse): void {
+        this.debugLog(`Sending approval ${approval.requestId}: ${approval.approved ? "approved" : "rejected"}.`, approval);
         const packet = new BetterCraftingApprovalPacket();
         packet.approval = approval;
         packet.sendTo(to);
     }
 
+    /** Server-side: sends a status update/error message to the client. */
+    private sendStatus(to: any, status: IBetterCraftingRequestStatus): void {
+        this.debugLog(`Sending status ${status.requestId}: ${status.kind}/${status.state}.`, status);
+        const packet = new BetterCraftingStatusPacket();
+        packet.status = status;
+        packet.sendTo(to);
+    }
+
     /** Client-side: handles error-only status messages from the server. */
     public handleMultiplayerStatus(status: IBetterCraftingRequestStatus): void {
+        this.debugLog(`Received status ${status.requestId}: ${status.kind}/${status.state}.`, status);
         if (status.selectionFailure) {
             this.debugLog(`Status ${status.requestId} failure details:`, status.selectionFailure);
         }
         if (status.state === "error" && status.message) {
-            this.panel?.showMultiplayerMessage(status.message);
+            this.showMultiplayerMessage(status.message);
         }
     }
 
@@ -709,6 +851,43 @@ export default class BetterCrafting extends Mod {
         return game.playerManager.getByIdentifier(identifier);
     }
 
+    private getConnectionForPlayer(player: Player | undefined): any {
+        const identifier = (player as any)?.identifier as string | undefined;
+        if (!identifier || !multiplayer?.isServer) return;
+
+        return multiplayer.getClients().find(connection => connection.playerIdentifier === identifier);
+    }
+
+    private buildCraftArgsSummary(args: any[]): IServerCraftBlockDiagnostics["argsSummary"] {
+        return {
+            itemType: args[0] as ItemType | undefined,
+            requiredCount: Array.isArray(args[1]) ? args[1].length : 0,
+            consumedCount: Array.isArray(args[2]) ? args[2].length : 0,
+            hasBase: args[3] !== undefined,
+        };
+    }
+
+    private reportBlockedRemoteCraft(
+        player: Player | undefined,
+        message: string,
+        diagnostics: IServerCraftBlockDiagnostics,
+    ): void {
+        this.debugLog(`Blocked remote ${ActionType[diagnostics.actionType]} action: ${diagnostics.reason}.`, diagnostics);
+
+        const connection = this.getConnectionForPlayer(player);
+        if (!connection) {
+            this.debugLog("Unable to send blocked craft status because no connection was found for the player.", diagnostics);
+            return;
+        }
+
+        this.sendStatus(connection, {
+            requestId: diagnostics.requestId ?? 0,
+            kind: diagnostics.actionType === ActionType.Dismantle ? "dismantle" : "craft",
+            state: "error",
+            message,
+        });
+    }
+
     /** Server-side: revokes remaining passes when the client aborts a bulk operation. */
     public abortServerRequest(connection: any, request: IBulkActionAbortRequest): void {
         const player = this.getPlayerFromConnection(connection);
@@ -721,6 +900,205 @@ export default class BetterCrafting extends Mod {
         }
     }
 
+    public processVanillaBypassPermit(connection: any, request: IVanillaCraftBypassPermitRequest): void {
+        this.debugLog(`Received vanilla bypass permit request ${request.requestId}.`, {
+            playerIdentifier: connection?.playerIdentifier,
+            request,
+        });
+        const player = this.getPlayerFromConnection(connection);
+        const key = this.getPlayerKey(player);
+        if (key === undefined) {
+            this.sendApproval(connection, {
+                requestId: request.requestId,
+                kind: "vanillaBypass",
+                approved: false,
+                message: "The vanilla bypass request could not be matched to a multiplayer player.",
+            });
+            return;
+        }
+
+        const recipe = itemDescriptions[request.itemType]?.recipe;
+        if (!recipe) {
+            this.sendApproval(connection, {
+                requestId: request.requestId,
+                kind: "vanillaBypass",
+                approved: false,
+                message: "No recipe was found for that vanilla bypass request.",
+            });
+            return;
+        }
+
+        this.serverCraftPasses.set(key, {
+            actionType: ActionType.Craft,
+            kind: "vanillaBypass",
+            itemType: request.itemType,
+            remaining: 1,
+            requestId: request.requestId,
+            expiresAt: Date.now() + 10_000,
+        });
+
+        this.serverVanillaBypassPermits.delete(key);
+        this.debugLog(`Granted vanilla bypass pass ${request.requestId} to player ${key}.`, {
+            playerIdentifier: connection?.playerIdentifier,
+            playerKey: key,
+            itemType: request.itemType,
+            request,
+        });
+        this.sendApproval(connection, {
+            requestId: request.requestId,
+            kind: "vanillaBypass",
+            approved: true,
+            passCount: 1,
+        });
+    }
+
+    private getVanillaCraftActionDetails(args: any[]): IVanillaCraftActionDetails | undefined {
+        const itemType = args[0] as ItemType | undefined;
+        if (itemType === undefined) return;
+
+        const requiredItems = Array.isArray(args[1]) ? args[1] as Item[] : undefined;
+        const consumedItems = Array.isArray(args[2]) ? args[2] as Item[] : undefined;
+        const base = args[3] as Item | undefined;
+
+        const requiredItemIds = getItemIds(requiredItems, item => this.getItemId(item));
+        const consumedItemIds = getItemIds(consumedItems, item => this.getItemId(item));
+        const baseItemId = this.getItemId(base);
+
+        if ((requiredItems?.length ?? 0) !== requiredItemIds.length) return;
+        if ((consumedItems?.length ?? 0) !== consumedItemIds.length) return;
+        if (base !== undefined && baseItemId === undefined) return;
+
+        return {
+            itemType,
+            requiredItemIds,
+            consumedItemIds,
+            baseItemId,
+        };
+    }
+
+    private areNumberArraysEqual(left: readonly number[], right: readonly number[]): boolean {
+        if (left.length !== right.length) return false;
+        for (let i = 0; i < left.length; i++) {
+            if (left[i] !== right[i]) return false;
+        }
+
+        return true;
+    }
+
+    private consumeVanillaBypassPermit(executor: Entity, args: any[]): boolean {
+        const key = this.getPlayerKey(executor as Player);
+        if (key === undefined) return false;
+
+        const permit = this.serverVanillaBypassPermits.get(key);
+        if (!permit) {
+            this.debugLog(`No vanilla bypass permit found for player ${key}.`, {
+                playerIdentifier: (executor as any)?.identifier,
+                playerKey: key,
+                argsSummary: this.buildCraftArgsSummary(args),
+            });
+            return false;
+        }
+
+        if (permit.expiresAt < Date.now()) {
+            this.debugLog(`Vanilla bypass permit ${permit.requestId} expired for player ${key}.`);
+            this.serverVanillaBypassPermits.delete(key);
+            return false;
+        }
+
+        const actionDetails = this.getVanillaCraftActionDetails(args);
+        if (!actionDetails) {
+            this.serverVanillaBypassPermits.delete(key);
+            return false;
+        }
+
+        const matches = actionDetails.itemType === permit.itemType
+            && actionDetails.baseItemId === permit.baseItemId
+            && this.areNumberArraysEqual(actionDetails.requiredItemIds, permit.requiredItemIds)
+            && this.areNumberArraysEqual(actionDetails.consumedItemIds, permit.consumedItemIds);
+
+        this.serverVanillaBypassPermits.delete(key);
+
+        if (!matches) {
+            this.debugLog(`Vanilla bypass permit ${permit.requestId} did not match server craft args for player ${key}.`, {
+                permit,
+                actionDetails,
+            });
+            return false;
+        }
+
+        this.debugLog(`Consumed vanilla bypass permit ${permit.requestId} for player ${key}.`, actionDetails);
+        return true;
+    }
+
+    private trySendVanillaBypassPermit(args: any[]): boolean {
+        if (!this.isRemoteMultiplayerClient()) return false;
+
+        const actionDetails = this.getVanillaCraftActionDetails(args);
+        if (!actionDetails) {
+            this.debugLog("Failed to serialize vanilla bypass permit from craft args.", args);
+            this.showMultiplayerMessage("The selected vanilla craft could not be validated for multiplayer. Release the bypass hotkey and try again.");
+            return false;
+        }
+
+        const itemType = args[0] as ItemType | undefined;
+        if (itemType === undefined) return false;
+
+        const requiredItems = Array.isArray(args[1]) ? [...args[1] as Item[]] : undefined;
+        const consumedItems = Array.isArray(args[2]) ? [...args[2] as Item[]] : undefined;
+        const baseItem = args[3] as Item | undefined;
+
+        const { requestId, promise } = this.requestApproval(currentRequestId => {
+            const packet = new BetterCraftingVanillaBypassPermitPacket();
+            packet.request = {
+                requestId: currentRequestId,
+                ...actionDetails,
+            };
+            this.pendingVanillaBypasses.set(currentRequestId, {
+                itemType,
+                requiredItems,
+                consumedItems,
+                baseItem,
+            });
+            this.debugLog(`Queued vanilla bypass request ${currentRequestId}.`, {
+                requestId: currentRequestId,
+                itemType,
+                requiredIds: getItemIds(requiredItems, item => this.getItemId(item)),
+                consumedIds: getItemIds(consumedItems, item => this.getItemId(item)),
+                baseId: this.getItemId(baseItem),
+            });
+            packet.send();
+            return true;
+        });
+
+        this.debugLog(`Blocked original vanilla craft pending bypass approval ${requestId}.`, {
+            requestId,
+            itemType,
+        });
+        void promise.then(approved => {
+            if (!approved && this.pendingVanillaBypasses.delete(requestId)) {
+                this.debugLog(`Cleared denied/timed-out vanilla bypass ${requestId}.`, { requestId });
+            }
+        });
+        return true;
+    }
+
+    private async replayApprovedVanillaBypass(pendingBypass: IPendingVanillaBypass, requestId: number): Promise<void> {
+        this.bypassIntercept = true;
+        try {
+            await ActionExecutor.get(Craft).execute(
+                localPlayer,
+                pendingBypass.itemType,
+                pendingBypass.requiredItems ? [...pendingBypass.requiredItems] : undefined,
+                pendingBypass.consumedItems ? [...pendingBypass.consumedItems] : undefined,
+                pendingBypass.baseItem,
+                undefined,
+            );
+        } finally {
+            this.debugLog(`Finished replaying vanilla bypass ${requestId}.`, { requestId, itemType: pendingBypass.itemType });
+            this.bypassIntercept = false;
+        }
+    }
+
     /**
      * Server-side: checks whether the executor has a valid pass for the given
      * action type, consumes one pass credit, and returns true if allowed.
@@ -730,9 +1108,26 @@ export default class BetterCrafting extends Mod {
         if (key === undefined) return false;
 
         const pass = this.serverCraftPasses.get(key);
-        if (!pass) return false;
+        if (!pass) {
+            this.debugLog(`No server pass found for player ${key}.`, {
+                playerIdentifier: (executor as any)?.identifier,
+                playerKey: key,
+                actionType,
+                argsSummary: this.buildCraftArgsSummary(args),
+            });
+            return false;
+        }
 
-        if (pass.actionType !== actionType) return false;
+        if (pass.actionType !== actionType) {
+            this.debugLog(`Server pass action type mismatch for player ${key}.`, {
+                playerIdentifier: (executor as any)?.identifier,
+                playerKey: key,
+                requestedActionType: actionType,
+                pass,
+                argsSummary: this.buildCraftArgsSummary(args),
+            });
+            return false;
+        }
         if (pass.expiresAt < Date.now()) {
             this.debugLog(`Pass expired for player ${key}.`);
             this.serverCraftPasses.delete(key);
@@ -740,16 +1135,48 @@ export default class BetterCrafting extends Mod {
         }
 
         if (actionType === ActionType.Craft) {
-            if ((args[0] as ItemType | undefined) !== pass.itemType) return false;
+            if ((args[0] as ItemType | undefined) !== pass.itemType) {
+                this.debugLog(`Server craft pass item type mismatch for player ${key}.`, {
+                    playerIdentifier: (executor as any)?.identifier,
+                    playerKey: key,
+                    pass,
+                    argsSummary: this.buildCraftArgsSummary(args),
+                });
+                return false;
+            }
         } else if (actionType === ActionType.Dismantle) {
             const item = args[0] as Item | undefined;
             const itemId = getItemId(item);
-            if (!item || item.type !== pass.itemType || itemId === undefined) return false;
-            if (pass.targetItemIds && !pass.targetItemIds.has(itemId)) return false;
+            if (!item || item.type !== pass.itemType || itemId === undefined) {
+                this.debugLog(`Server dismantle pass target mismatch for player ${key}.`, {
+                    playerIdentifier: (executor as any)?.identifier,
+                    playerKey: key,
+                    pass,
+                    itemType: item?.type,
+                    itemId,
+                });
+                return false;
+            }
+            if (pass.targetItemIds && !pass.targetItemIds.has(itemId)) {
+                this.debugLog(`Server dismantle pass item id mismatch for player ${key}.`, {
+                    playerIdentifier: (executor as any)?.identifier,
+                    playerKey: key,
+                    pass,
+                    itemId,
+                });
+                return false;
+            }
             pass.targetItemIds?.delete(itemId);
         }
 
         pass.remaining--;
+        this.debugLog(`Consumed server pass ${pass.requestId} for player ${key}.`, {
+            playerIdentifier: (executor as any)?.identifier,
+            playerKey: key,
+            actionType,
+            remaining: pass.remaining,
+            argsSummary: this.buildCraftArgsSummary(args),
+        });
         if (pass.remaining <= 0) {
             this.serverCraftPasses.delete(key);
         }
@@ -1570,6 +1997,10 @@ export default class BetterCrafting extends Mod {
      * permanent block, and sends an approval response.
      */
     public processCraftRequest(connection: any, request: ICraftSelectionRequest): void {
+        this.debugLog(`Received craft approval request ${request.requestId}.`, {
+            playerIdentifier: connection?.playerIdentifier,
+            request,
+        });
         const player = this.getPlayerFromConnection(connection);
         if (!player) return;
 
@@ -1599,6 +2030,11 @@ export default class BetterCrafting extends Mod {
             requestId: request.requestId,
             expiresAt: Date.now() + 30_000,
         });
+        this.debugLog(`Granted craft pass ${request.requestId} to player ${key}.`, {
+            playerIdentifier: connection?.playerIdentifier,
+            playerKey: key,
+            itemType: request.itemType,
+        });
 
         this.sendApproval(connection, {
             requestId: request.requestId,
@@ -1614,6 +2050,10 @@ export default class BetterCrafting extends Mod {
      * locally; each iteration's ActionPacket consumes one pass.
      */
     public processBulkCraftRequest(connection: any, request: IBulkCraftRequest): void {
+        this.debugLog(`Received bulk craft approval request ${request.requestId}.`, {
+            playerIdentifier: connection?.playerIdentifier,
+            request,
+        });
         const player = this.getPlayerFromConnection(connection);
         if (!player) return;
 
@@ -1657,6 +2097,12 @@ export default class BetterCrafting extends Mod {
             // Scale timeout: 30s base + 2s per craft iteration.
             expiresAt: Date.now() + 30_000 + (request.quantity * 2_000),
         });
+        this.debugLog(`Granted bulk craft pass ${request.requestId} to player ${key}.`, {
+            playerIdentifier: connection?.playerIdentifier,
+            playerKey: key,
+            itemType: request.itemType,
+            remaining: request.quantity,
+        });
 
         this.sendApproval(connection, {
             requestId: request.requestId,
@@ -1671,6 +2117,10 @@ export default class BetterCrafting extends Mod {
      * target), and sends an approval response.
      */
     public processDismantleRequest(connection: any, request: IDismantleRequest): void {
+        this.debugLog(`Received dismantle approval request ${request.requestId}.`, {
+            playerIdentifier: connection?.playerIdentifier,
+            request,
+        });
         const player = this.getPlayerFromConnection(connection);
         if (!player) return;
 
@@ -1708,6 +2158,13 @@ export default class BetterCrafting extends Mod {
             expiresAt: Date.now() + 30_000 + (targets.length * 2_000),
             targetItemIds: new Set(request.targetItemIds),
         });
+        this.debugLog(`Granted dismantle pass ${request.requestId} to player ${key}.`, {
+            playerIdentifier: connection?.playerIdentifier,
+            playerKey: key,
+            itemType: request.itemType,
+            remaining: targets.length,
+            targetItemIds: request.targetItemIds,
+        });
 
         this.sendApproval(connection, {
             requestId: request.requestId,
@@ -1715,6 +2172,16 @@ export default class BetterCrafting extends Mod {
             approved: true,
             passCount: targets.length,
         });
+    }
+
+    private isVanillaBypassCraftRequested(actionType: ActionType, actionApi: IActionHandlerApi<Entity>): boolean {
+        if (actionType !== ActionType.Craft) return false;
+        if (actionApi.executor !== localPlayer) return false;
+        if (!this.isRemoteMultiplayerClient()) return false;
+        if (this.bypassIntercept) return false;
+
+        return this.settings.activationMode === "holdHotkeyToBypass"
+            && this.isActivationHotkeyHeld();
     }
 
     // ── Action interception ───────────────────────────────────────────────────
@@ -1734,12 +2201,101 @@ export default class BetterCrafting extends Mod {
             if (actionType === ActionType.Craft || actionType === ActionType.Dismantle) {
                 const executor = actionApi.executor;
                 if (executor !== localPlayer) {
+                    const player = executor as Player;
+                    const playerKey = this.getPlayerKey(player);
+                    const pass = playerKey === undefined ? undefined : this.serverCraftPasses.get(playerKey);
+                    const permit = playerKey === undefined ? undefined : this.serverVanillaBypassPermits.get(playerKey);
+                    const actionDetails = actionType === ActionType.Craft
+                        ? this.getVanillaCraftActionDetails(args)
+                        : undefined;
+                    this.debugLog(`Evaluating remote ${ActionType[actionType]} action on server.`, {
+                        playerIdentifier: (player as any)?.identifier,
+                        playerKey,
+                        actionType,
+                        itemType: args[0] as ItemType | undefined,
+                        pass,
+                        bypassPermit: permit,
+                        actionDetails,
+                        argsSummary: this.buildCraftArgsSummary(args),
+                    });
+                    if (actionType === ActionType.Craft && this.consumeVanillaBypassPermit(executor, args)) {
+                        return;
+                    }
                     if (this.consumeServerPass(executor, actionType, args)) {
                         return; // Pass consumed — allow this mod-approved action through.
+                    }
+                    if (actionType === ActionType.Craft) {
+                        this.reportBlockedRemoteCraft(player, "That vanilla craft could not be validated in multiplayer. Try again without bypass if it keeps happening.", {
+                            playerIdentifier: (player as any)?.identifier,
+                            playerKey,
+                            actionType,
+                            itemType: args[0] as ItemType | undefined,
+                            requestId: pass?.requestId ?? permit?.requestId,
+                            actionDetails,
+                            argsSummary: this.buildCraftArgsSummary(args),
+                            pass: pass
+                                ? {
+                                    kind: pass.kind,
+                                    requestId: pass.requestId,
+                                    remaining: pass.remaining,
+                                    expiresAt: pass.expiresAt,
+                                    itemType: pass.itemType,
+                                }
+                                : undefined,
+                            bypassPermit: permit
+                                ? {
+                                    requestId: permit.requestId,
+                                    expiresAt: permit.expiresAt,
+                                    itemType: permit.itemType,
+                                }
+                                : undefined,
+                            reason: !actionDetails
+                                ? "actionArgsUnserializable"
+                                : pass
+                                    ? pass.expiresAt < Date.now()
+                                        ? "approvalGrantedButPassExpired"
+                                        : "approvalGrantedButPassMismatch"
+                                    : permit
+                                        ? permit.expiresAt < Date.now()
+                                            ? "bypassPermitExpired"
+                                            : "bypassPermitMismatch"
+                                        : "noApprovalRequest",
+                        });
+                    } else {
+                        this.reportBlockedRemoteCraft(player, "That dismantle action could not be validated in multiplayer. Try again if it keeps happening.", {
+                            playerIdentifier: (player as any)?.identifier,
+                            playerKey,
+                            actionType,
+                            itemType: (args[0] as Item | undefined)?.type,
+                            requestId: pass?.requestId,
+                            argsSummary: this.buildCraftArgsSummary(args),
+                            pass: pass
+                                ? {
+                                    kind: pass.kind,
+                                    requestId: pass.requestId,
+                                    remaining: pass.remaining,
+                                    expiresAt: pass.expiresAt,
+                                    itemType: pass.itemType,
+                                }
+                                : undefined,
+                            reason: pass ? "approvalGrantedButPassMismatch" : "dismantlePassMissing",
+                        });
                     }
                     return false;
                 }
             }
+        }
+
+        if (this.isVanillaBypassCraftRequested(actionType, actionApi)) {
+            const queued = this.trySendVanillaBypassPermit(args);
+            if (queued) {
+                this.debugLog("Intercepted vanilla bypass craft and blocked the original action pending approval.", {
+                    itemType: args[0] as ItemType | undefined,
+                    argsSummary: this.buildCraftArgsSummary(args),
+                });
+            }
+
+            return false;
         }
 
         if (!this.shouldOpenBetterCrafting()) return;

@@ -17,3 +17,12 @@ export function getValidatedItemId(item: ItemWithId | undefined, context = "item
 
     return id;
 }
+
+export function getItemIds<T>(items: readonly T[] | undefined, getId: (item: T) => number | undefined): number[] {
+    if (!items) return [];
+    return items.map(item => getId(item)).filter((id): id is number => id !== undefined);
+}
+
+export function getItemIdSet<T>(items: readonly T[] | undefined, getId: (item: T) => number | undefined): Set<number> {
+    return new Set(getItemIds(items, getId));
+}

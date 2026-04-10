@@ -28,7 +28,7 @@ import {
     isSplitConsumption,
     partitionSelectedItems,
 } from "./craftingSelection";
-import { getItemIdSafe } from "./itemIdentity";
+import { getItemIdSafe, getItemIds } from "./itemIdentity";
 import type {
     IBulkCraftRequest,
     ICraftSelectionRequest,
@@ -1455,13 +1455,13 @@ export default class BetterCraftingPanel extends Component {
                 slotIndex,
                 requiredAmount: component.requiredAmount,
                 selectedIds: request.slotSelections.find(selection => selection.slotIndex === slotIndex)?.itemIds ?? [],
-                candidateIds: this.findMatchingItems(component.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                candidateIds: getItemIds(this.findMatchingItems(component.type), item => getItemId(item)),
             })) ?? [],
             base: this.recipe?.baseComponent === undefined
                 ? undefined
                 : {
                     selectedId: request.baseItemId,
-                    candidateIds: this.findMatchingItems(this.recipe.baseComponent).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                    candidateIds: getItemIds(this.findMatchingItems(this.recipe.baseComponent), item => getItemId(item)),
                 },
         };
     }
@@ -1482,11 +1482,11 @@ export default class BetterCraftingPanel extends Component {
                 slotIndex,
                 requiredAmount: component?.requiredAmount,
                 consumedAmount: component?.consumedAmount,
-                selectedIds: items.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                consumedIds: consumedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                requiredIds: items.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                splitConsumedIds: splitSelection?.consumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                splitUsedIds: splitSelection?.used.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                selectedIds: getItemIds(items, item => getItemId(item)),
+                consumedIds: getItemIds(consumedItems, item => getItemId(item)),
+                requiredIds: getItemIds(items, item => getItemId(item)),
+                splitConsumedIds: getItemIds(splitSelection?.consumed, item => getItemId(item)),
+                splitUsedIds: getItemIds(splitSelection?.used, item => getItemId(item)),
             };
         });
 
@@ -1500,8 +1500,8 @@ export default class BetterCraftingPanel extends Component {
 
         return {
             itemType,
-            requiredIds: payload.required.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-            consumedIds: payload.consumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+            requiredIds: getItemIds(payload.required, item => getItemId(item)),
+            consumedIds: getItemIds(payload.consumed, item => getItemId(item)),
             baseId: getItemId(base),
             slots,
         };
@@ -1514,19 +1514,11 @@ export default class BetterCraftingPanel extends Component {
                 slotIndex,
                 requiredAmount: component.requiredAmount,
                 consumedAmount: component.consumedAmount,
-                selectedIds: (this.selectedItems.get(slotIndex) ?? [])
-                    .map(item => getItemId(item))
-                    .filter((id): id is number => id !== undefined),
-                consumedIds: (this.splitSelectedItems.get(slotIndex)?.consumed ?? [])
-                    .map(item => getItemId(item))
-                    .filter((id): id is number => id !== undefined),
-                usedIds: (this.splitSelectedItems.get(slotIndex)?.used ?? [])
-                    .map(item => getItemId(item))
-                    .filter((id): id is number => id !== undefined),
+                selectedIds: getItemIds(this.selectedItems.get(slotIndex), item => getItemId(item)),
+                consumedIds: getItemIds(this.splitSelectedItems.get(slotIndex)?.consumed, item => getItemId(item)),
+                usedIds: getItemIds(this.splitSelectedItems.get(slotIndex)?.used, item => getItemId(item)),
             })) ?? [],
-            baseIds: (this.selectedItems.get(-1) ?? [])
-                .map(item => getItemId(item))
-                .filter((id): id is number => id !== undefined),
+            baseIds: getItemIds(this.selectedItems.get(-1), item => getItemId(item)),
         };
     }
 
@@ -1540,14 +1532,14 @@ export default class BetterCraftingPanel extends Component {
                 slotIndex: selection.slotIndex,
                 itemIds: selection.itemIds,
                 candidateIds: this.recipe?.components[selection.slotIndex]
-                    ? this.findMatchingItems(this.recipe.components[selection.slotIndex].type).map(item => getItemId(item)).filter((id): id is number => id !== undefined)
+                    ? getItemIds(this.findMatchingItems(this.recipe.components[selection.slotIndex].type), item => getItemId(item))
                     : [],
             })),
             pinnedUsedSelections: (request.pinnedUsedSelections ?? []).map(selection => ({
                 slotIndex: selection.slotIndex,
                 itemIds: selection.itemIds,
                 candidateIds: this.recipe?.components[selection.slotIndex]
-                    ? this.findMatchingItems(this.recipe.components[selection.slotIndex].type).map(item => getItemId(item)).filter((id): id is number => id !== undefined)
+                    ? getItemIds(this.findMatchingItems(this.recipe.components[selection.slotIndex].type), item => getItemId(item))
                     : [],
             })),
         };
@@ -1556,57 +1548,23 @@ export default class BetterCraftingPanel extends Component {
     private serializeSlotSelection(slotIndex: number, type: ItemType | ItemTypeGroup, requiredAmount: number): ISelectionSlotIds | undefined {
         const component = this.recipe?.components[slotIndex];
         const candidates = this.findMatchingItems(type);
-        let repairedItems: Item[];
-
-        if (component && this.isSplitComponent(component)) {
-            const repairedSplit = this.repairSplitSelection(slotIndex, component, candidates);
-            repairedItems = [...repairedSplit.consumed, ...repairedSplit.used];
-            if (repairedSplit.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
-                || repairedSplit.used.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) {
-                return this.showSelectionChangedError(this.getSelectionFailureMessage({
-                    reason: "itemUnavailable",
-                    slotIndex,
-                    itemTypeOrGroup: type as number,
-                    requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                    candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                }));
-            }
-
-            this.setSplitSelection(slotIndex, repairedSplit.consumed, repairedSplit.used);
-        } else {
-            const sanitizedItems = this.sanitizeSelectedItems(this.selectedItems.get(slotIndex) ?? [], candidates, requiredAmount);
-            repairedItems = this.supplementSelectedItems(sanitizedItems, candidates, requiredAmount);
-            if (repairedItems.length < requiredAmount) {
-                return this.showSelectionChangedError(this.getSelectionFailureMessage({
-                    reason: "itemUnavailable",
-                    slotIndex,
-                    itemTypeOrGroup: type as number,
-                    requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                    candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                }));
-            }
-
-            this.clearSplitSelection(slotIndex);
-            this.selectedItems.set(slotIndex, repairedItems);
-        }
-
-        if (repairedItems.length < requiredAmount) {
-            return this.showSelectionChangedError(this.getSelectionFailureMessage({
-                reason: "itemUnavailable",
-                slotIndex,
-                itemTypeOrGroup: type as number,
-                requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-            }));
-        }
+        const resolved = component
+            ? this.resolveComponentSelection(slotIndex, component, candidates, requiredAmount)
+            : undefined;
+        if (!resolved) return undefined;
 
         return {
             slotIndex,
-            itemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+            itemIds: getItemIds(resolved.items, item => getItemId(item)),
         };
     }
 
     public serializeCraftSelectionRequest(requestId: number): ICraftSelectionRequest | undefined {
+        this.debugLog("SerializeCraftSelectionRequest", {
+            requestId,
+            itemType: this.itemType,
+            selectedState: this.buildCurrentNormalCraftSelectionState(),
+        });
         if (!this.itemType || !this.recipe) return undefined;
 
         const slotSelections: ISelectionSlotIds[] = [];
@@ -1650,48 +1608,9 @@ export default class BetterCraftingPanel extends Component {
         for (let i = 0; i < this.recipe.components.length; i++) {
             const component = this.recipe.components[i];
             const candidates = this.findMatchingItems(component.type);
-            let repairedItems: Item[];
-            if (this.isSplitComponent(component)) {
-                const repairedSplit = this.repairSplitSelection(i, component, candidates);
-                repairedItems = [...repairedSplit.consumed, ...repairedSplit.used];
-                if (repairedSplit.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
-                    || repairedSplit.used.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) {
-                    return this.showSelectionChangedError(this.getSelectionFailureMessage({
-                        reason: "itemUnavailable",
-                        slotIndex: i,
-                        itemTypeOrGroup: component.type as number,
-                        requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                        candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                    }));
-                }
-
-                this.setSplitSelection(i, repairedSplit.consumed, repairedSplit.used);
-            } else {
-                const sanitizedItems = this.sanitizeSelectedItems(this.selectedItems.get(i) ?? [], candidates, component.requiredAmount);
-                repairedItems = this.supplementSelectedItems(sanitizedItems, candidates, component.requiredAmount);
-                if (repairedItems.length < component.requiredAmount) {
-                    return this.showSelectionChangedError(this.getSelectionFailureMessage({
-                        reason: "itemUnavailable",
-                        slotIndex: i,
-                        itemTypeOrGroup: component.type as number,
-                        requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                        candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                    }));
-                }
-
-                this.clearSplitSelection(i);
-                this.selectedItems.set(i, repairedItems);
-            }
-            if (repairedItems.length < component.requiredAmount) {
-                return this.showSelectionChangedError(this.getSelectionFailureMessage({
-                    reason: "itemUnavailable",
-                    slotIndex: i,
-                    itemTypeOrGroup: component.type as number,
-                    requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                    candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                }));
-            }
-            slotSelections.set(i, repairedItems);
+            const resolved = this.resolveComponentSelection(i, component, candidates, component.requiredAmount);
+            if (!resolved) return undefined;
+            slotSelections.set(i, resolved.items);
         }
 
         let base: Item | undefined;
@@ -1729,6 +1648,19 @@ export default class BetterCraftingPanel extends Component {
     }
 
     public serializeBulkCraftRequest(requestId: number, quantity: number): IBulkCraftRequest | undefined {
+        this.debugLog("SerializeBulkCraftRequest", {
+            requestId,
+            quantity,
+            itemType: this.itemType,
+            pinnedToolSelections: [...this.bulkPinnedToolSelections.entries()].map(([slotIndex, items]) => ({
+                slotIndex,
+                itemIds: getItemIds(items, item => getItemId(item)),
+            })),
+            pinnedUsedSelections: [...this.bulkPinnedUsedSelections.entries()].map(([slotIndex, items]) => ({
+                slotIndex,
+                itemIds: getItemIds(items, item => getItemId(item)),
+            })),
+        });
         if (!this.itemType || !this.recipe) return undefined;
 
         const excludedIds = [...this.getBulkExcludedIds()];
@@ -1775,6 +1707,13 @@ export default class BetterCraftingPanel extends Component {
     }
 
     public serializeDismantleRequest(requestId: number, quantity: number): IDismantleRequest | undefined {
+        this.debugLog("SerializeDismantleRequest", {
+            requestId,
+            quantity,
+            itemType: this.dismantleSelectedItemType,
+            excludedIds: [...this.dismantleExcludedIds],
+            requiredSelectionId: getItemId(this.dismantleRequiredSelection),
+        });
         if (!this.dismantleSelectedItemType || !this.dismantleDescription) return undefined;
 
         const targets = this.sanitizeSelectedItems(this.getIncludedDismantleItems().slice(0, quantity), this.findMatchingItems(this.dismantleSelectedItemType), quantity);
@@ -2019,7 +1958,6 @@ export default class BetterCraftingPanel extends Component {
 
         this.selectedItems.clear();
         this.splitSelectedItems.clear();
-        this.splitSelectedItems.clear();
 
         const desc = itemDescriptions[itemType as ItemType];
         this.recipe = desc?.recipe;
@@ -2093,6 +2031,12 @@ export default class BetterCraftingPanel extends Component {
     }
 
     public refreshDismantleView(preserveScroll = true, preserveQuantity = true, preserveSelections = true): void {
+        this.debugLog("RefreshDismantleView", {
+            preserveScroll,
+            preserveQuantity,
+            preserveSelections,
+            itemType: this.dismantleSelectedItemType,
+        });
         if (!preserveSelections) {
             this.dismantleExcludedIds.clear();
             this.dismantleRequiredSelection = undefined;
@@ -2108,6 +2052,13 @@ export default class BetterCraftingPanel extends Component {
     }
 
     public refreshVisibleCraftingViews(preserveScroll = true): void {
+        this.debugLog("RefreshVisibleCraftingViews", {
+            preserveScroll,
+            panelMode: this.panelMode,
+            activeTab: this.activeTab,
+            itemType: this.itemType,
+            dismantleItemType: this.dismantleSelectedItemType,
+        });
         if (this.panelMode === "dismantle") {
             this.refreshDismantleView(preserveScroll, true, true);
             return;
@@ -2120,6 +2071,11 @@ export default class BetterCraftingPanel extends Component {
     }
 
     private rebuildNormalContent(preserveScroll = false): void {
+        this.debugLog("BuildNormalContent", {
+            preserveScroll,
+            itemType: this.itemType,
+            hasRecipe: this.recipe !== undefined,
+        });
         const scrollTop = preserveScroll ? this.scrollContent.element.scrollTop : 0;
         const scrollLeft = preserveScroll ? this.scrollContent.element.scrollLeft : 0;
 
@@ -2266,6 +2222,55 @@ export default class BetterCraftingPanel extends Component {
             consumed: repairedConsumed,
             used: repairedUsed,
         };
+    }
+
+    private reportSelectionUnavailable(
+        slotIndex: number,
+        type: ItemType | ItemTypeGroup,
+        requestedItems: readonly Item[],
+        candidates: readonly Item[],
+    ): undefined {
+        return this.showSelectionChangedError(this.getSelectionFailureMessage({
+            reason: "itemUnavailable",
+            slotIndex,
+            itemTypeOrGroup: type as number,
+            requestedItemIds: getItemIds(requestedItems, item => getItemId(item)),
+            candidateItemIds: getItemIds(candidates, item => getItemId(item)),
+        }));
+    }
+
+    private resolveComponentSelection(
+        slotIndex: number,
+        component: IRecipeComponent,
+        candidates: readonly Item[],
+        requiredAmount: number,
+        pendingSplitIds?: { consumedIds: number[]; usedIds: number[] },
+        writeBack = true,
+    ): { items: Item[]; split?: INormalSplitSelection } | undefined {
+        if (this.isSplitComponent(component)) {
+            const repairedSplit = this.repairSplitSelection(slotIndex, component, candidates, pendingSplitIds);
+            const repairedItems = [...repairedSplit.consumed, ...repairedSplit.used];
+            if (repairedSplit.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
+                || repairedSplit.used.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) {
+                return this.reportSelectionUnavailable(slotIndex, component.type, repairedItems, candidates);
+            }
+
+            if (writeBack) this.setSplitSelection(slotIndex, repairedSplit.consumed, repairedSplit.used);
+            return { items: repairedItems, split: repairedSplit };
+        }
+
+        const sanitizedItems = this.sanitizeSelectedItems(this.selectedItems.get(slotIndex) ?? [], candidates, requiredAmount);
+        const repairedItems = this.supplementSelectedItems(sanitizedItems, candidates, requiredAmount);
+        if (repairedItems.length < requiredAmount) {
+            return this.reportSelectionUnavailable(slotIndex, component.type, repairedItems, candidates);
+        }
+
+        if (writeBack) {
+            this.clearSplitSelection(slotIndex);
+            this.selectedItems.set(slotIndex, repairedItems);
+        }
+
+        return { items: repairedItems };
     }
 
     private collectCurrentNormalSelectionIds(): Set<number> {
@@ -2946,6 +2951,13 @@ export default class BetterCraftingPanel extends Component {
      * longer have items, resets the quantity to 1, and redraws all sections.
      */
     private buildBulkContent(preserveScroll = false, preserveQuantity = false): void {
+        this.debugLog("BuildBulkContent", {
+            preserveScroll,
+            preserveQuantity,
+            itemType: this.itemType,
+            hasRecipe: this.recipe !== undefined,
+            bulkQuantity: this.bulkQuantity,
+        });
         const scrollTop = preserveScroll ? this.bulkScrollContent.element.scrollTop : 0;
         const scrollLeft = preserveScroll ? this.bulkScrollContent.element.scrollLeft : 0;
         this._bulkContentDirty = false;
@@ -3008,6 +3020,12 @@ export default class BetterCraftingPanel extends Component {
     }
 
     private buildDismantleContent(preserveScroll = false): void {
+        this.debugLog("BuildDismantleContent", {
+            preserveScroll,
+            itemType: this.dismantleSelectedItemType,
+            hasDismantle: this.dismantleDescription !== undefined,
+            bulkQuantity: this.bulkQuantity,
+        });
         const scrollTop = preserveScroll ? this.bulkScrollContent.element.scrollTop : 0;
         const scrollLeft = preserveScroll ? this.bulkScrollContent.element.scrollLeft : 0;
         this.bulkStaticContent.dump();
@@ -3115,9 +3133,9 @@ export default class BetterCraftingPanel extends Component {
 
     private addDismantleHelpBox(): void {
         this.addHelpBox("dismantle", "How This Works", [
-            ["Targets", "Matching targets start included and can be excluded."],
-            ["Required", "Required items use checked single-select selection."],
-            ["Order", "Included targets are dismantled in list order."],
+            ["Consumed", "Selected targets are dismantled and consumed by the action."],
+            ["Used", "Required items are needed for the action but are not consumed."],
+            ["Tool", "Tool rows stay after the action and lose durability as normal."],
             ["Hotkey", `Current hotkey: ${this.getCurrentHotkeyText()}. ${this.getActivationModeText()}`],
         ]);
     }
@@ -3500,8 +3518,9 @@ export default class BetterCraftingPanel extends Component {
 
     private addNormalHelpBox(): void {
         this.addHelpBox("normal", "How This Works", [
-            ["Select", "Choose the exact materials and tools for this recipe."],
-            ["Rules", "Selection follows vanilla crafting rules."],
+            ["Consumed", "Consumed items are destroyed when you complete the craft."],
+            ["Used", "Used items are required for the craft but are not consumed."],
+            ["Tool", "Tool rows stay after the craft and lose durability as normal."],
             ["Quality", "Result quality depends on your crafting skill."],
             ["Hotkey", `Current hotkey: ${this.getCurrentHotkeyText()}. ${this.getActivationModeText()}`],
         ]);
@@ -3513,8 +3532,9 @@ export default class BetterCraftingPanel extends Component {
      */
     private addBulkHelpBox(): void {
         this.addHelpBox("bulk", "How This Works", [
-            ["Consumed", "Consumed materials start included and can be excluded."],
-            ["Tools", "Tool rows use checked inclusion selection and follow vanilla crafting rules."],
+            ["Consumed", "Consumed items are destroyed when the craft completes."],
+            ["Used", "Used items are required for the craft but are not consumed."],
+            ["Tool", "Tool rows stay after the craft and lose durability as normal."],
             ["Hotkey", `Current hotkey: ${this.getCurrentHotkeyText()}. ${this.getActivationModeText()}`],
         ]);
     }
