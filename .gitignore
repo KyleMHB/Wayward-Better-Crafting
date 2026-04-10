@@ -1,4 +1,7 @@
 node_modules/
+.npm-cache/
+dist/
+.test-tmp/
 *.tsbuildinfo
 .claude/
 mod-reference/

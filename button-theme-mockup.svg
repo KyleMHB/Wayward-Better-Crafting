@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#14110f"/>
+      <stop offset="100%" stop-color="#0e0b09"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1410"/>
+      <stop offset="100%" stop-color="#120e0b"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+    <style>
+      .title { font: 700 28px/1.2 "Trebuchet MS", "Segoe UI", sans-serif; fill: #d4c89a; letter-spacing: 0.5px; }
+      .label { font: 700 18px/1.2 "Trebuchet MS", "Segoe UI", sans-serif; fill: #cdbf91; letter-spacing: 0.2px; }
+      .body { font: 500 15px/1.45 "Trebuchet MS", "Segoe UI", sans-serif; fill: #c2b089; }
+      .small { font: 600 14px/1.2 "Trebuchet MS", "Segoe UI", sans-serif; fill: #c2b089; }
+      .buttonText { font: 700 20px/1 "Trebuchet MS", "Segoe UI", sans-serif; fill: #ffffff; }
+      .buttonTextDark { font: 700 20px/1 "Trebuchet MS", "Segoe UI", sans-serif; fill: #1a140c; }
+      .helpTitle { font: 700 18px/1.2 "Trebuchet MS", "Segoe UI", sans-serif; fill: #d4c89a; }
+      .helpText { font: 500 14px/1.45 "Trebuchet MS", "Segoe UI", sans-serif; fill: #c8bc8a; }
+      .chipText { font: 700 13px/1 "Trebuchet MS", "Segoe UI", sans-serif; fill: #d8c79a; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <text x="56" y="56" class="title">Button and Help Box Mockup</text>
+  <text x="56" y="84" class="body">Muted fills, white labels, and screen-tinted help boxes</text>
+
+  <!-- panels -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="120" width="480" height="710" rx="10" fill="url(#panel)" stroke="#8c7b44" stroke-width="2"/>
+    <rect x="560" y="120" width="480" height="710" rx="10" fill="url(#panel)" stroke="#1e3a58" stroke-width="2"/>
+    <rect x="1070" y="120" width="480" height="710" rx="10" fill="url(#panel)" stroke="#6a3428" stroke-width="2"/>
+  </g>
+
+  <!-- Craft -->
+  <text x="80" y="165" class="label">Normal Crafting</text>
+  <rect x="80" y="190" width="420" height="120" rx="8" fill="#17120f" stroke="#554433" stroke-width="1.2"/>
+  <rect x="80" y="190" width="420" height="34" rx="8" fill="#261d14" opacity="0.95"/>
+  <text x="100" y="212" class="helpTitle">How This Works</text>
+  <text x="100" y="246" class="helpText">Select the exact materials and tools for this recipe.</text>
+  <text x="100" y="268" class="helpText">Selection follows vanilla crafting rules.</text>
+  <text x="100" y="290" class="helpText">Current hotkey: Shift. Hold hotkey to bypass Better Crafting UI.</text>
+
+  <rect x="110" y="360" width="360" height="64" rx="10" fill="#8a784d" stroke="#6a5d40" stroke-width="2"/>
+  <text x="290" y="400" text-anchor="middle" class="buttonText">Craft with Selected</text>
+  <rect x="360" y="452" width="110" height="38" rx="8" fill="#3f372b" stroke="#5b4f3c" stroke-width="1.5"/>
+  <text x="415" y="477" text-anchor="middle" class="buttonText">Cancel</text>
+  <text x="110" y="455" class="body">Primary action uses a muted warm brass tone with white text.</text>
+
+  <rect x="80" y="540" width="420" height="250" rx="8" fill="#17120f" stroke="#554433" stroke-width="1.2"/>
+  <text x="100" y="572" class="small">Craft button sample</text>
+  <rect x="100" y="594" width="180" height="34" rx="8" fill="#8a784d"/>
+  <text x="190" y="617" text-anchor="middle" class="buttonText">Craft</text>
+  <text x="310" y="616" class="body">white text</text>
+
+  <!-- Bulk -->
+  <text x="590" y="165" class="label">Bulk Crafting</text>
+  <rect x="590" y="190" width="420" height="120" rx="8" fill="#17120f" stroke="#1e3a58" stroke-width="1.2"/>
+  <rect x="590" y="190" width="420" height="34" rx="8" fill="#15263b" opacity="0.95"/>
+  <text x="610" y="212" class="helpTitle">How This Works</text>
+  <text x="610" y="246" class="helpText">Consumed materials start included and can be excluded.</text>
+  <text x="610" y="268" class="helpText">Tool rows use checked inclusion selection and follow vanilla crafting rules.</text>
+  <text x="610" y="290" class="helpText">Current hotkey: Shift. Hold hotkey to bypass Better Crafting UI.</text>
+
+  <rect x="650" y="360" width="360" height="64" rx="10" fill="#7a91a6" stroke="#556f86" stroke-width="2"/>
+  <text x="830" y="400" text-anchor="middle" class="buttonText">Bulk Craft</text>
+  <rect x="870" y="452" width="110" height="38" rx="8" fill="#3f372b" stroke="#5b4f3c" stroke-width="1.5"/>
+  <text x="925" y="477" text-anchor="middle" class="buttonText">Cancel</text>
+  <text x="650" y="455" class="body">Muted steel-blue button with white label.</text>
+
+  <rect x="590" y="540" width="420" height="250" rx="8" fill="#17120f" stroke="#1e3a58" stroke-width="1.2"/>
+  <text x="610" y="572" class="small">Bulk button sample</text>
+  <rect x="610" y="594" width="180" height="34" rx="8" fill="#7a91a6"/>
+  <text x="700" y="617" text-anchor="middle" class="buttonText">Bulk Craft</text>
+  <text x="820" y="616" class="body">white text</text>
+
+  <!-- Dismantle -->
+  <text x="1100" y="165" class="label">Dismantling</text>
+  <rect x="1100" y="190" width="420" height="120" rx="8" fill="#17120f" stroke="#6a3428" stroke-width="1.2"/>
+  <rect x="1100" y="190" width="420" height="34" rx="8" fill="#2d1711" opacity="0.95"/>
+  <text x="1120" y="212" class="helpTitle">How This Works</text>
+  <text x="1120" y="246" class="helpText">Matching targets start included and can be excluded.</text>
+  <text x="1120" y="268" class="helpText">Required items use checked single-select selection.</text>
+  <text x="1120" y="290" class="helpText">Current hotkey: Shift. Hold hotkey to bypass Better Crafting UI.</text>
+
+  <rect x="1160" y="360" width="360" height="64" rx="10" fill="#9f7c6d" stroke="#734f43" stroke-width="2"/>
+  <text x="1340" y="400" text-anchor="middle" class="buttonText">Dismantle</text>
+  <rect x="1380" y="452" width="110" height="38" rx="8" fill="#3f372b" stroke="#5b4f3c" stroke-width="1.5"/>
+  <text x="1435" y="477" text-anchor="middle" class="buttonText">Cancel</text>
+  <text x="1160" y="455" class="body">Muted rust button with white label.</text>
+
+  <rect x="1100" y="540" width="420" height="250" rx="8" fill="#17120f" stroke="#6a3428" stroke-width="1.2"/>
+  <text x="1120" y="572" class="small">Dismantle button sample</text>
+  <rect x="1120" y="594" width="180" height="34" rx="8" fill="#9f7c6d"/>
+  <text x="1210" y="617" text-anchor="middle" class="buttonText">Dismantle</text>
+  <text x="1330" y="616" class="body">white text</text>
+
+  <!-- legend -->
+  <g transform="translate(50,850)">
+    <rect x="0" y="-24" width="1500" height="30" rx="6" fill="#120f0d" stroke="#3d2f22" stroke-width="1"/>
+    <text x="14" y="-4" class="chipText">Muted fills + white labels. Help boxes and panels are tinted by screen.</text>
+  </g>
+</svg>

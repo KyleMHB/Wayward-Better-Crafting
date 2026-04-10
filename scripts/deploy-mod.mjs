@@ -8,6 +8,7 @@ import {
     pathExists,
     stageRuntimeFiles,
 } from "./runtime-package.mjs";
+import { syncModVersion } from "./sync-version.mjs";
 
 const rootDir = process.cwd();
 const configPath = path.join(rootDir, "config.toml");
@@ -59,6 +60,7 @@ function parseConfigToml(content) {
 
 
 async function main() {
+    await syncModVersion(rootDir);
     const config = parseConfigToml(await readFile(configPath, "utf8"));
     const modManifest = JSON.parse(await readFile(modJsonPath, "utf8"));
 

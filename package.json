@@ -1,9 +1,15 @@
 {
+  "version": "1.7.0",
   "scripts": {
-    "build": "npm.cmd exec --yes --package typescript -- tsc --build --force --pretty tsconfig.json",
-    "deploy": "npm.cmd run build && node ./scripts/deploy-mod.mjs"
+    "sync:version": "node ./scripts/sync-version.mjs",
+    "build": "npm run sync:version && node ./scripts/run-tsc.mjs --build --force --pretty tsconfig.json",
+    "typecheck": "node ./scripts/run-tsc.mjs -p tsconfig.typecheck.json",
+    "test": "node --test tests/*.test.mjs",
+    "verify": "npm run sync:version && npm run typecheck && npm run test",
+    "deploy": "npm run build && node ./scripts/deploy-mod.mjs"
   },
   "devDependencies": {
-    "@types/jquery": "^4.0.0"
+    "@types/jquery": "^4.0.0",
+    "typescript": "^5.9.3"
   }
 }

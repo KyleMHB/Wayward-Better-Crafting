@@ -1,34 +1,16 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { collectWhitelistedRuntimeFiles, fileExists, pathExists, stageRuntimeFiles } from "./runtime-package.mjs";
+import { syncModVersion } from "./sync-version.mjs";
+import { runTypeScript } from "./typescript-runner.mjs";
 
 const rootDir = process.cwd();
 const modJsonPath = path.join(rootDir, "mod.json");
 const stagingRoot = path.join(rootDir, "dist");
 const stagingDir = path.join(stagingRoot, "package");
 
-function runCommand(command, args) {
-    return new Promise((resolve, reject) => {
-        const child = spawn("cmd.exe", ["/d", "/s", "/c", command, ...args], {
-            cwd: rootDir,
-            stdio: "inherit",
-            shell: false,
-        });
-
-        child.on("error", reject);
-        child.on("exit", code => {
-            if (code === 0) {
-                resolve();
-                return;
-            }
-
-            reject(new Error(`${command} exited with code ${code ?? "unknown"}`));
-        });
-    });
-}
-
 async function main() {
+    await syncModVersion(rootDir);
     const modManifest = JSON.parse(await readFile(modJsonPath, "utf8"));
     const entryFile = modManifest.file;
 
@@ -40,7 +22,7 @@ async function main() {
         throw new Error(`Build source directory does not exist: ${rootDir}`);
     }
 
-    await runCommand("npm.cmd", ["exec", "--yes", "--package", "typescript", "--", "tsc", "-p", "tsconfig.json"]);
+    await runTypeScript(["-p", "tsconfig.json"], { cwd: rootDir });
 
     const entryFilePath = path.join(rootDir, entryFile);
     if (!(await fileExists(entryFilePath))) {

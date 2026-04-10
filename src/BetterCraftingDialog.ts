@@ -5,7 +5,7 @@ import Text from "@wayward/game/ui/component/Text";
 import TranslationImpl from "@wayward/game/language/impl/TranslationImpl";
 import { itemDescriptions } from "@wayward/game/game/item/ItemDescriptions";
 import { ItemType, ItemTypeGroup, RecipeLevel } from "@wayward/game/game/item/IItem";
-import type { IRecipe, IRecipeComponent } from "@wayward/game/game/item/IItem";
+import type { IDismantleDescription, IRecipe, IRecipeComponent } from "@wayward/game/game/item/IItem";
 import { SkillType } from "@wayward/game/game/entity/skill/ISkills";
 import type Item from "@wayward/game/game/item/Item";
 import ItemManager from "@wayward/game/game/item/ItemManager";
@@ -17,30 +17,80 @@ import { ItemComponentHandler } from "@wayward/game/ui/screen/screens/game/compo
 import { HighlightType } from "@wayward/game/ui/util/IHighlight";
 import type { HighlightSelector, IHighlight } from "@wayward/game/ui/util/IHighlight";
 import { Stat } from "@wayward/game/game/entity/IStats";
+import Log from "@wayward/utilities/Log";
+import { appendInlineStat, createColoredListLine, createHelpBoxRow } from "./BetterCraftingDom";
+import type { HelpBoxRowContent } from "./BetterCraftingDom";
+import {
+    buildCraftExecutionPayload,
+    filterSelectableItems,
+    getConsumedSelectionCount,
+    getUsedSelectionCount,
+    isSplitConsumption,
+    partitionSelectedItems,
+} from "./craftingSelection";
+import { getItemIdSafe } from "./itemIdentity";
+import type {
+    IBulkCraftRequest,
+    ICraftSelectionRequest,
+    IDismantleRequest,
+    ISelectionFailureDetails,
+    ISelectionSlotIds,
+} from "./multiplayer/BetterCraftingProtocol";
 
-type CraftCallback = (itemType: ItemType, tools: Item[] | undefined, consumed: Item[] | undefined, base: Item | undefined) => Promise<void>;
+type CraftCallback = (itemType: ItemType, required: Item[] | undefined, consumed: Item[] | undefined, base: Item | undefined) => Promise<void>;
 type BulkCraftCallback = (itemType: ItemType, quantity: number, excludedIds: Set<number>) => Promise<void>;
+type DismantleCallback = (items: Item[], requiredItem?: Item) => Promise<void>;
 
 export interface IBetterCraftingSettings {
     activationMode: "holdHotkeyToBypass" | "holdHotkeyToAccess";
     activationHotkey: "Shift" | "Control" | "Alt";
     unsafeBulkCrafting: boolean;
+    debugLogging: boolean;
 }
 
 type SettingsAccessor = () => IBetterCraftingSettings;
 
-export interface ICraftDisplayResult {
-    success: boolean;
-    item?: Item;
+interface ICraftExecutionDiagnostics {
     itemType: ItemType;
+    requiredIds: number[];
+    consumedIds: number[];
+    baseId: number | undefined;
+    slots: Array<{
+        slotIndex: number;
+        requiredAmount?: number;
+        consumedAmount?: number;
+        selectedIds: number[];
+        consumedIds: number[];
+        requiredIds: number[];
+        splitConsumedIds?: number[];
+        splitUsedIds?: number[];
+    }>;
+}
+
+type SectionSemantic = "base" | "consumed" | "used" | "tool";
+
+interface INormalSplitSelection {
+    consumed: Item[];
+    used: Item[];
 }
 
 interface IBulkCraftSelection {
-    tools: Item[];
+    required: Item[];
     consumed: Item[];
     base: Item | undefined;
     permanentlyConsumedIds: Set<number>;
+    slotSelections: Map<number, Item[]>;
 }
+
+interface IResolvedNormalCraftSelection {
+    required: Item[];
+    consumed: Item[];
+    base: Item | undefined;
+    slotSelections: Map<number, Item[]>;
+}
+
+type PanelMode = "craft" | "dismantle";
+type HelpBoxId = "normal" | "bulk" | "dismantle";
 
 // Quality enum value -> CSS color
 const QUALITY_COLORS: Record<number, string> = {
@@ -52,6 +102,35 @@ const QUALITY_COLORS: Record<number, string> = {
     [Quality.Mastercrafted]: "#ff8c00",
     [Quality.Relic]:         "#ffd700",
 };
+
+const SCREEN_THEME = {
+    normal: {
+        title: "#d4c89a",
+        body: "#9a8860",
+        accent: "#c0b080",
+        strong: "#d4c89a",
+        muted: "#7a6850",
+        unsafe: "#c0b080",
+    },
+    bulk: {
+        title: "#a8d0ef",
+        body: "#8ab8d8",
+        accent: "#c3def3",
+        strong: "#c3def3",
+        muted: "#78aace",
+        unsafe: "#8ab8d8",
+    },
+    dismantle: {
+        title: "#d79b86",
+        body: "#e1b4a3",
+        accent: "#f0c8bb",
+        strong: "#f0c8bb",
+        muted: "#c9826a",
+        unsafe: "#d79b86",
+    },
+} as const;
+
+const craftDebugLog = Log.warn("Better Crafting", "CraftDebug");
 
 function getQualityColor(quality?: Quality): string {
     return QUALITY_COLORS[quality ?? Quality.None] ?? QUALITY_COLORS[Quality.None];
@@ -68,8 +147,8 @@ function qualitySortKey(quality?: Quality): number {
     return q as number;
 }
 
-function getItemId(item: Item): number {
-    return (item as any).id as number;
+function getItemId(item: Item | undefined): number | undefined {
+    return getItemIdSafe(item);
 }
 
 function toRoman(n: number): string {
@@ -85,6 +164,10 @@ function toRoman(n: number): string {
 
 function isItemProtected(item: Item): boolean {
     return (item as any).isProtected === true || (item as any).protected === true;
+}
+
+function getSectionCounterKey(slotIndex: number, semantic: SectionSemantic = "base"): string {
+    return `${slotIndex}:${semantic}`;
 }
 
 const ROW_MIN_HEIGHT = 30;   // px
@@ -105,23 +188,30 @@ export const STAMINA_COST_PER_LEVEL: Partial<Record<RecipeLevel, number>> = {
 
 export default class BetterCraftingPanel extends Component {
     public itemType: number = 0;
+    private panelMode: PanelMode = "craft";
+    private tabBar!: HTMLDivElement;
+    private closeBtn!: HTMLButtonElement;
     private scrollContent: Component;
     private normalScrollInner!: Component;
     private bulkScrollInner!: Component;
     private _sectionResizeObserver?: ResizeObserver;
     private _sectionResizeRafId?: number;
     private recipe?: IRecipe;
+    private dismantleDescription?: IDismantleDescription;
     private onCraftCallback: CraftCallback;
     private onBulkCraftCallback: BulkCraftCallback;
+    private onDismantleCallback: DismantleCallback;
     private getSettings: SettingsAccessor;
     private craftBtn!: Button;
     private validationMsg?: Text;
 
     private selectedItems: Map<number, Item[]> = new Map();
-    private sectionCounters: Map<number, Text> = new Map();
+    private splitSelectedItems: Map<number, INormalSplitSelection> = new Map();
+    private sectionCounters: Map<string, Text> = new Map();
 
     /** IDs of items selected before last craft. null = first open. */
     private _pendingSelectionIds: Set<number> | null = null;
+    private _pendingSplitSelectionIds: Map<number, { consumedIds: number[]; usedIds: number[] }> | null = null;
 
     // ── Tooltip state ─────────────────────────────────────────────────────────
     private bcTooltipEl: HTMLDivElement | null = null;
@@ -133,6 +223,7 @@ export default class BetterCraftingPanel extends Component {
 
     // ── Inventory watching ────────────────────────────────────────────────────
     private _inventoryRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    private _inventoryRefreshQueued = false;
     private _inventoryWatchHandlers: {
         onAdd: () => void;
         onRemove: () => void;
@@ -149,27 +240,146 @@ export default class BetterCraftingPanel extends Component {
     private bulkBody!: Component;
     private bulkStaticContent!: Component;
     private bulkFooter!: Component;
-    private normalResultsEl!: HTMLDivElement;
-    private bulkResultsEl!: HTMLDivElement;
-
     // ── Bulk crafting state ───────────────────────────────────────────────────
     /** Map<slotIndex, Set<itemId>> — excluded item IDs per ingredient slot. */
     private bulkExcludedIds: Map<number, Set<number>> = new Map();
+    private bulkPreserveDurabilityBySlot: Map<number, boolean> = new Map();
+    private bulkPinnedToolSelections: Map<number, Item[]> = new Map();
+    private bulkPinnedUsedSelections: Map<number, Item[]> = new Map();
     /** Last itemType for which bulkExcludedIds was built — used to detect recipe changes. */
     private _lastBulkItemType: number = 0;
     private bulkQuantity: number = 1;
     private bulkQtyInputEl: HTMLInputElement | null = null;
     private bulkMaxLabel: HTMLSpanElement | null = null;
     private bulkCraftBtnEl: Button | null = null;
+    private bulkUnsafeToggleEl: CheckButton | null = null;
+    private bulkUnsafeToggleWrap: HTMLDivElement | null = null;
     private bulkScrollContent!: Component;
     private _bulkContentDirty = true;
     private bulkStopBtn: Button | null = null;
     private bulkQtyRow: HTMLElement | null = null;
     private bulkProgressEl: HTMLElement | null = null;
     private onBulkAbortCallback: (() => void) | null = null;
+    private onPanelHideCallback: (() => void) | null = null;
+    private bulkProgressVerb = "Crafting";
+    private unsafeCraftingEnabled = false;
+    private lastBulkResolutionMessage?: string;
+    private destroyed = false;
+
+    private dismantleExcludedIds = new Set<number>();
+    private dismantleRequiredSelection?: Item;
+    private dismantleSelectedItemType?: ItemType;
+    private preserveDismantleRequiredDurability = true;
+    private helpBoxExpanded: Record<HelpBoxId, boolean> = {
+        normal: false,
+        bulk: false,
+        dismantle: false,
+    };
 
     private get activationHotkey(): IBetterCraftingSettings["activationHotkey"] {
         return this.getSettings().activationHotkey;
+    }
+
+    private get debugLoggingEnabled(): boolean {
+        return this.getSettings().debugLogging === true;
+    }
+
+    public isUnsafeCraftingEnabled(): boolean {
+        return this.unsafeCraftingEnabled;
+    }
+
+    public showMultiplayerMessage(message: string): void {
+        this.showValidationError(message);
+    }
+
+    private debugLog(message: string, payload?: unknown): void {
+        if (!this.debugLoggingEnabled) return;
+        if (payload === undefined) {
+            craftDebugLog(message);
+        } else {
+            craftDebugLog(message, payload);
+        }
+    }
+
+    public consumeLastBulkResolutionMessage(): string | undefined {
+        const message = this.lastBulkResolutionMessage;
+        this.lastBulkResolutionMessage = undefined;
+        return message;
+    }
+
+    private setUnsafeCraftingEnabled(enabled: boolean): void {
+        this.unsafeCraftingEnabled = enabled;
+        if (this.bulkUnsafeToggleEl) {
+            this.bulkUnsafeToggleEl.setChecked(enabled, false);
+        }
+    }
+
+    private resetUnsafeCraftingEnabled(): void {
+        this.setUnsafeCraftingEnabled(false);
+    }
+
+    private getPanelScale(panelRect = this.element.getBoundingClientRect()): number {
+        return this.element.offsetWidth > 0
+            ? panelRect.width / this.element.offsetWidth
+            : 1;
+    }
+
+    private anchorPanelToViewport(): { panelRect: DOMRect; scale: number; cssLeft: number; cssTop: number } {
+        const panelRect = this.element.getBoundingClientRect();
+        const scale = this.getPanelScale(panelRect);
+        const cssLeft = panelRect.left / scale;
+        const cssTop = panelRect.top / scale;
+
+        this.style.set("transform", "none");
+        this.element.style.left = `${cssLeft}px`;
+        this.element.style.top = `${cssTop}px`;
+
+        return { panelRect, scale, cssLeft, cssTop };
+    }
+
+    private getMinDimensionPx(property: "minWidth" | "minHeight", fallback: number): number {
+        const computedValue = window.getComputedStyle(this.element)[property];
+        const parsed = Number.parseFloat(computedValue);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    private beginResize(direction: "right" | "bottom" | "corner", event: MouseEvent): void {
+        if (event.button !== 0) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const { panelRect, scale } = this.anchorPanelToViewport();
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const startWidth = panelRect.width / scale;
+        const startHeight = panelRect.height / scale;
+        const minWidth = this.getMinDimensionPx("minWidth", 280);
+        const minHeight = this.getMinDimensionPx("minHeight", 200);
+
+        this.element.style.width = `${startWidth}px`;
+        this.element.style.height = `${startHeight}px`;
+
+        const onMouseMove = (moveEvent: MouseEvent) => {
+            const deltaX = (moveEvent.clientX - startX) / scale;
+            const deltaY = (moveEvent.clientY - startY) / scale;
+
+            if (direction === "right" || direction === "corner") {
+                this.element.style.width = `${Math.max(minWidth, startWidth + deltaX)}px`;
+            }
+
+            if (direction === "bottom" || direction === "corner") {
+                this.element.style.height = `${Math.max(minHeight, startHeight + deltaY)}px`;
+            }
+        };
+
+        const onMouseUp = () => {
+            document.removeEventListener("mousemove", onMouseMove);
+            document.removeEventListener("mouseup", onMouseUp);
+        };
+
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
     }
 
     private isConfiguredHotkey(key: string): boolean {
@@ -222,11 +432,31 @@ export default class BetterCraftingPanel extends Component {
         this.bcHideTooltip();
     };
 
-    public constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback, getSettings: SettingsAccessor) {
+    public constructor(
+        onCraft: CraftCallback,
+        onBulkCraft: BulkCraftCallback,
+        onDismantle: DismantleCallback,
+        getSettings: SettingsAccessor,
+        initialUnsafeCrafting = false,
+    ) {
         super();
         this.onCraftCallback = onCraft;
         this.onBulkCraftCallback = onBulkCraft;
+        this.onDismantleCallback = onDismantle;
         this.getSettings = getSettings;
+        this.unsafeCraftingEnabled = initialUnsafeCrafting;
+        const buttonTheme = {
+            craftFill: "#553c02",
+            craftBorder: "#553c02",
+            craftHover: "#765404",
+            bulkFill: "#135695",
+            bulkBorder: "#135695",
+            bulkHover: "#055daa",
+            dismantleFill: "#742504",
+            dismantleBorder: "#742504",
+            dismantleHover: "#9c3205",
+            text: "#b4b4b4",
+        } as const;
 
         // ── Global styles (injected once) ────────────────────────────────────
         const STYLE_ID = "better-crafting-styles";
@@ -236,7 +466,14 @@ export default class BetterCraftingPanel extends Component {
             styleEl.textContent = `
                 /* ── Panel: never fade regardless of Wayward focus state ────── */
                 .better-crafting-panel {
+                    --bc-panel-accent: #8c7b44;
+                    --bc-panel-accent-soft: rgba(140, 123, 68, 0.45);
                     opacity: 1 !important;
+                    position: relative;
+                    box-sizing: border-box;
+                    border-style: solid !important;
+                    border-width: 1px !important;
+                    border-color: var(--bc-panel-accent) !important;
                 }
 
                 /* ── Title / headings: hardcoded warm-cream, won't dim ───────── */
@@ -249,16 +486,21 @@ export default class BetterCraftingPanel extends Component {
 
                 /* ── Craft button: gold theme ─────────────────────────────── */
                 .better-crafting-craft-btn {
-                    background: #b09c5a !important;
-                    color: #111111 !important;
+                    background: ${buttonTheme.craftFill} !important;
+                    color: ${buttonTheme.text} !important;
                     font-weight: bold !important;
-                    border: 1px solid #8c7b44 !important;
+                    border: 1px solid ${buttonTheme.craftBorder} !important;
                     transition: background 0.2s;
                     opacity: 1 !important;
                 }
+                .better-crafting-craft-btn,
+                .better-crafting-craft-btn * {
+                    color: ${buttonTheme.text} !important;
+                    -webkit-text-fill-color: ${buttonTheme.text} !important;
+                }
                 .better-crafting-craft-btn:hover {
-                    background: #c5b272 !important;
-                    border: 1px solid #c5b272 !important;
+                    background: ${buttonTheme.craftHover} !important;
+                    border: 1px solid ${buttonTheme.craftHover} !important;
                 }
                 .better-crafting-craft-btn.bc-craft-disabled {
                     opacity: 0.35 !important;
@@ -299,6 +541,13 @@ export default class BetterCraftingPanel extends Component {
                     flex-shrink: 0;
                     border-bottom: 1px solid var(--color-border, #554433);
                 }
+                .bc-header-bar {
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 10px;
+                    flex-shrink: 0;
+                    padding: 8px 42px 8px 10px;
+                }
                 .bc-tab-btn {
                     flex: 1;
                     padding: 6px 10px;
@@ -318,6 +567,59 @@ export default class BetterCraftingPanel extends Component {
                     color: #d4c89a;
                     border-bottom: 2px solid #b09c5a;
                     background: rgba(40,30,16,0.8);
+                }
+                .bc-panel-close {
+                    position: absolute;
+                    top: 7px;
+                    right: 8px;
+                    z-index: 3;
+                    width: 26px;
+                    height: 26px;
+                    padding: 0 2px;
+                    border: 0;
+                    background: transparent;
+                    color: #ffffff;
+                    font: inherit;
+                    font-size: 1.7em;
+                    font-weight: 400;
+                    line-height: 1;
+                    cursor: pointer;
+                    transition: color 0.12s ease, opacity 0.12s ease;
+                }
+                .bc-panel-close:hover {
+                    color: #ffffff;
+                    opacity: 0.8;
+                }
+                .bc-resize-handle {
+                    position: absolute;
+                    z-index: 2;
+                    background: transparent;
+                }
+                .bc-resize-handle-right {
+                    top: 0;
+                    right: 0;
+                    width: 10px;
+                    height: calc(100% - 12px);
+                    cursor: ew-resize;
+                }
+                .bc-resize-handle-bottom {
+                    left: 0;
+                    right: 12px;
+                    bottom: 0;
+                    height: 10px;
+                    cursor: ns-resize;
+                }
+                .bc-resize-handle-corner {
+                    right: 0;
+                    bottom: 0;
+                    width: 14px;
+                    height: 14px;
+                    cursor: nwse-resize;
+                    background-image:
+                        linear-gradient(135deg, transparent 0 50%, var(--bc-panel-accent-soft) 50% 56%, transparent 56% 100%),
+                        linear-gradient(135deg, transparent 0 68%, var(--bc-panel-accent-soft) 68% 74%, transparent 74% 100%),
+                        linear-gradient(135deg, transparent 0 86%, var(--bc-panel-accent) 86% 92%, transparent 92% 100%);
+                    background-repeat: no-repeat;
                 }
 
                 /* ── Bulk item row: excluded state ────────────────────────────── */
@@ -397,6 +699,54 @@ export default class BetterCraftingPanel extends Component {
                     margin: 2px 0;
                     padding-left: 10px;
                 }
+                .bc-help-box {
+                    flex: 1 1 100%;
+                    width: 100%;
+                    box-sizing: border-box;
+                    border: 1px solid var(--color-border, #554433);
+                    border-radius: 3px;
+                    background: rgba(30, 22, 12, 0.45);
+                    overflow: hidden;
+                }
+                .bc-help-box-toggle {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    width: 100%;
+                    padding: 7px 10px;
+                    border: 0;
+                    background: transparent;
+                    color: inherit;
+                    font: inherit;
+                    cursor: pointer;
+                    text-align: left;
+                }
+                .bc-help-box-toggle:hover {
+                    background: rgba(255, 255, 255, 0.04);
+                }
+                .bc-help-box-caret {
+                    flex: 0 0 auto;
+                    width: 1em;
+                    color: #c8bc8a;
+                    transition: transform 0.15s ease;
+                }
+                .bc-help-box.bc-help-box-expanded .bc-help-box-caret {
+                    transform: rotate(90deg);
+                }
+                .bc-help-box-title {
+                    flex: 1 1 auto;
+                    font-weight: bold;
+                    color: #d4c89a;
+                    letter-spacing: 0.02em;
+                }
+                .bc-help-box-content {
+                    padding: 0 10px 8px;
+                    color: #c8bc8a;
+                    line-height: 1.5;
+                }
+                .bc-help-box-content strong {
+                    color: #d4c89a;
+                }
                 /* Materials section header */
                 .bc-bulk-materials-header {
                     flex: 1 1 100%;
@@ -414,14 +764,6 @@ export default class BetterCraftingPanel extends Component {
 
                 /* ── Blue theme: applied to panel root when bulk tab is active ── */
                 /* Tab active indicator */
-                .bc-panel-bulk .bc-tab-btn.bc-tab-active {
-                    color: #8ab8d8 !important;
-                    border-bottom: 2px solid #3a82b8 !important;
-                    background: rgba(16, 36, 58, 0.85) !important;
-                }
-                .bc-panel-bulk .bc-tab-btn:hover {
-                    color: #a8d0ef !important;
-                }
                 /* Section borders */
                 .bc-panel-bulk .bc-bulk-section {
                     border: 1px solid #1e3a58 !important;
@@ -429,6 +771,19 @@ export default class BetterCraftingPanel extends Component {
                 /* Output card border */
                 .bc-panel-bulk .bc-bulk-output-card {
                     border: 1px solid #1e3a58 !important;
+                }
+                .bc-panel-bulk .bc-bulk-output-card,
+                .bc-panel-bulk .bc-bulk-output-card *,
+                .bc-panel-bulk .bc-unsafe-toggle-wrap,
+                .bc-panel-bulk .bc-unsafe-toggle-label,
+                .bc-panel-bulk .bc-unsafe-toggle-info,
+                .bc-panel-bulk .bc-unsafe-toggle-checkbox {
+                    color: #8ab8d8 !important;
+                }
+                .bc-panel-bulk {
+                    --bc-panel-accent: #3a82b8;
+                    --bc-panel-accent-soft: rgba(58, 130, 184, 0.45);
+                    border-color: var(--bc-panel-accent) !important;
                 }
                 /* Footer border */
                 .bc-panel-bulk .dialog-footer {
@@ -475,60 +830,154 @@ export default class BetterCraftingPanel extends Component {
                 .bc-panel-bulk .better-crafting-item-list {
                     scrollbar-color: #3a6a9a rgba(0,0,0,0.3) !important;
                 }
+                .bc-panel-bulk .bc-help-box {
+                    border-color: #1e3a58 !important;
+                    background: linear-gradient(180deg, rgba(20, 43, 68, 0.58), rgba(12, 25, 39, 0.50)) !important;
+                }
+                .bc-panel-bulk .bc-help-box-title,
+                .bc-panel-bulk .bc-help-box-caret {
+                    color: #a8d0ef !important;
+                }
+                .bc-panel-bulk .bc-help-box-content {
+                    color: #8ab8d8 !important;
+                }
+                .bc-panel-bulk .bc-help-box-toggle:hover {
+                    background: rgba(106, 163, 212, 0.10) !important;
+                }
+                .bc-panel-bulk .bc-help-box-content strong {
+                    color: #c3def3 !important;
+                }
+                .bc-panel-bulk .better-crafting-craft-btn {
+                    background: ${buttonTheme.bulkFill} !important;
+                    border: 1px solid ${buttonTheme.bulkBorder} !important;
+                    color: ${buttonTheme.text} !important;
+                }
+                .bc-panel-bulk .better-crafting-craft-btn,
+                .bc-panel-bulk .better-crafting-craft-btn * {
+                    color: ${buttonTheme.text} !important;
+                    -webkit-text-fill-color: ${buttonTheme.text} !important;
+                }
+                .bc-panel-bulk .better-crafting-craft-btn:hover {
+                    background: ${buttonTheme.bulkHover} !important;
+                    border: 1px solid ${buttonTheme.bulkHover} !important;
+                    color: ${buttonTheme.text} !important;
+                }
 
-                .bc-results-panel {
-                    flex-shrink: 0;
-                    margin: 0 10px 8px;
-                    padding: 8px 10px;
-                    border-top: 1px solid rgba(84, 68, 51, 0.7);
-                    background: rgba(14, 10, 6, 0.72);
-                    display: none;
+                .bc-panel-dismantle {
+                    --bc-panel-accent: #6a3428;
+                    --bc-panel-accent-soft: rgba(106, 52, 40, 0.45);
+                    border-color: var(--bc-panel-accent) !important;
                 }
-                .bc-results-title {
-                    color: #c8bc8a;
-                    font-size: 0.9em;
-                    font-weight: bold;
-                    letter-spacing: 0.04em;
-                    margin-bottom: 6px;
-                    text-transform: uppercase;
+                .bc-panel-dismantle .bc-header-bar {
+                    min-height: 22px;
+                    padding: 0 !important;
                 }
-                .bc-results-status {
+                .bc-panel-dismantle .dialog-footer {
+                    border-top-color: #5c2f24 !important;
+                }
+                .bc-panel-dismantle .better-crafting-body {
+                    padding-top: 0 !important;
+                }
+                .bc-panel-dismantle .bc-panel-close {
+                    top: 5px;
+                    right: 6px;
+                }
+                .bc-panel-dismantle .better-crafting-heading,
+                .bc-panel-dismantle .better-crafting-title,
+                .bc-panel-dismantle .bc-dismantle-header-title {
+                    color: #d79b86 !important;
+                }
+                .bc-panel-dismantle .bc-dismantle-output-title,
+                .bc-panel-dismantle .bc-dismantle-section-title {
+                    color: #c9826a !important;
+                }
+                .bc-panel-dismantle .better-crafting-section,
+                .bc-panel-dismantle .bc-dismantle-header-card,
+                .bc-panel-dismantle .bc-bulk-help-box,
+                .bc-panel-dismantle .bc-bulk-materials-header {
+                    border-color: #6a3428 !important;
+                    background: linear-gradient(180deg, rgba(64, 24, 16, 0.60), rgba(36, 13, 9, 0.50)) !important;
+                }
+                .bc-panel-dismantle .bc-dismantle-header-card,
+                .bc-panel-dismantle .bc-dismantle-header-card *,
+                .bc-panel-dismantle .bc-unsafe-toggle-wrap,
+                .bc-panel-dismantle .bc-unsafe-toggle-label,
+                .bc-panel-dismantle .bc-unsafe-toggle-info,
+                .bc-panel-dismantle .bc-unsafe-toggle-checkbox {
+                    color: #d79b86 !important;
+                }
+                .bc-panel-dismantle .bc-help-box {
+                    border-color: #6a3428 !important;
+                    background: linear-gradient(180deg, rgba(64, 24, 16, 0.60), rgba(36, 13, 9, 0.50)) !important;
+                }
+                .bc-panel-dismantle .bc-help-box-title,
+                .bc-panel-dismantle .bc-help-box-caret {
+                    color: #d79b86 !important;
+                }
+                .bc-panel-dismantle .bc-help-box-content {
+                    color: #e1b4a3 !important;
+                }
+                .bc-panel-dismantle .bc-help-box-toggle:hover {
+                    background: rgba(215, 155, 134, 0.08) !important;
+                }
+                .bc-panel-dismantle .bc-help-box-content strong {
+                    color: #f0c8bb !important;
+                }
+                .bc-panel-dismantle .better-crafting-craft-btn {
+                    background: ${buttonTheme.dismantleFill} !important;
+                    border: 1px solid ${buttonTheme.dismantleBorder} !important;
+                    color: ${buttonTheme.text} !important;
+                }
+                .bc-panel-dismantle .better-crafting-craft-btn,
+                .bc-panel-dismantle .better-crafting-craft-btn * {
+                    color: ${buttonTheme.text} !important;
+                    -webkit-text-fill-color: ${buttonTheme.text} !important;
+                }
+                .bc-panel-dismantle .better-crafting-craft-btn:hover {
+                    background: ${buttonTheme.dismantleHover} !important;
+                    border: 1px solid ${buttonTheme.dismantleHover} !important;
+                    color: ${buttonTheme.text} !important;
+                }
+                .bc-panel-dismantle .bc-qty-input {
+                    background: rgba(42,18,12,0.88) !important;
+                    color: #e1b4a3 !important;
+                    border-color: #6a3428 !important;
+                }
+                .bc-panel-dismantle .bc-qty-btn {
+                    background: rgba(88,36,24,0.85) !important;
+                    color: #e1b4a3 !important;
+                    border-color: #6a3428 !important;
+                }
+                .bc-panel-dismantle .bc-qty-btn:hover {
+                    background: rgba(112,48,32,0.9) !important;
+                    color: #f0c2b0 !important;
+                }
+                .bc-panel-dismantle .better-crafting-item-list {
+                    scrollbar-color: #8a4c3d rgba(0,0,0,0.3) !important;
+                }
+                .bc-dismantle-output-list {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 4px 8px;
+                    align-items: flex-start;
+                }
+                .bc-dismantle-output-entry {
                     display: inline-flex;
                     align-items: center;
-                    gap: 6px;
-                    padding: 3px 8px;
-                    border-radius: 999px;
-                    font-size: 0.88em;
-                    font-weight: bold;
-                    margin-bottom: 8px;
-                }
-                .bc-results-status-success {
-                    background: rgba(46, 125, 50, 0.22);
-                    color: #8ce29a;
-                    border: 1px solid rgba(46, 125, 50, 0.48);
-                }
-                .bc-results-status-failed {
-                    background: rgba(156, 52, 52, 0.22);
-                    color: #ff8d8d;
-                    border: 1px solid rgba(156, 52, 52, 0.48);
-                }
-                .bc-results-summary-list {
-                    display: flex;
-                    flex-direction: column;
                     gap: 4px;
+                    padding: 0;
+                    border: 0;
+                    border-radius: 0;
+                    background: transparent;
+                    color: #cbb5aa;
+                    flex: 0 1 auto;
+                    min-width: 0;
                 }
-                .bc-results-summary-line {
-                    font-size: 0.95em;
-                    line-height: 1.35;
+                .bc-dismantle-output-entry .item-component {
+                    transform: scale(0.82);
+                    transform-origin: left center;
                 }
-                .bc-results-empty {
-                    color: #9a8860;
-                    font-size: 0.9em;
-                }
-                .bc-panel-bulk .bc-results-panel {
-                    border-top-color: rgba(74, 143, 204, 0.45);
-                    background: rgba(12, 22, 36, 0.62);
-                }
+
             `;
             document.head.appendChild(styleEl);
         }
@@ -540,12 +989,11 @@ export default class BetterCraftingPanel extends Component {
         this.style.set("left", "50%");
         this.style.set("transform", "translateX(-50%)");
 
-        this.style.set("width", "20vw");
+        this.style.set("width", "40vw");
         this.style.set("min-width", "280px");
-        this.style.set("height", "40vh");
+        this.style.set("height", "60vh");
         this.style.set("min-height", "200px");
 
-        this.style.set("resize", "both");
         this.style.set("overflow", "hidden");
         this.style.set("z-index", "1000");
         this.style.set("display", "none");
@@ -560,22 +1008,11 @@ export default class BetterCraftingPanel extends Component {
         this.element.addEventListener("mousedown", (e: MouseEvent) => {
             if (e.button !== 0) return;
             const t = e.target as HTMLElement;
-            if (t.closest("button, .better-crafting-item-list, input, select")) return;
-            const panelRect = this.element.getBoundingClientRect();
-            if (e.clientX >= panelRect.right - 20 && e.clientY >= panelRect.bottom - 20) return;
+            if (t.closest("button, .better-crafting-item-list, input, select, .bc-resize-handle")) return;
 
-            const scale = this.element.offsetWidth > 0
-                ? panelRect.width / this.element.offsetWidth
-                : 1;
-
-            const cssLeft  = panelRect.left  / scale;
-            const cssTop   = panelRect.top   / scale;
+            const { scale, cssLeft, cssTop } = this.anchorPanelToViewport();
             const startX   = e.clientX;
             const startY   = e.clientY;
-
-            this.style.set("transform", "none");
-            this.element.style.left = `${cssLeft}px`;
-            this.element.style.top  = `${cssTop}px`;
 
             const onMouseMove = (ev: MouseEvent) => {
                 this.element.style.left = `${cssLeft + (ev.clientX - startX) / scale}px`;
@@ -590,22 +1027,52 @@ export default class BetterCraftingPanel extends Component {
         });
 
         // ── Tab bar ───────────────────────────────────────────────────────────
+        const headerBar = document.createElement("div");
+        headerBar.className = "bc-header-bar";
+
         const tabBar = document.createElement("div");
         tabBar.className = "bc-tab-bar";
+        this.tabBar = tabBar;
+        tabBar.style.flex = "1 1 auto";
 
         this.normalTabBtn = document.createElement("button");
-        this.normalTabBtn.className = "bc-tab-btn bc-tab-active";
+        this.normalTabBtn.className = "bc-tab-btn bc-tab-normal bc-tab-active";
         this.normalTabBtn.textContent = "Normal Crafting";
         this.normalTabBtn.addEventListener("click", () => this.switchTab("normal"));
 
         this.bulkTabBtn = document.createElement("button");
-        this.bulkTabBtn.className = "bc-tab-btn";
+        this.bulkTabBtn.className = "bc-tab-btn bc-tab-bulk";
         this.bulkTabBtn.textContent = "Bulk Crafting";
         this.bulkTabBtn.addEventListener("click", () => this.switchTab("bulk"));
 
         tabBar.appendChild(this.normalTabBtn);
         tabBar.appendChild(this.bulkTabBtn);
-        this.element.appendChild(tabBar);
+        headerBar.appendChild(tabBar);
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "bc-panel-close";
+        closeBtn.type = "button";
+        closeBtn.innerHTML = "&times;";
+        closeBtn.setAttribute("aria-label", "Close");
+        closeBtn.title = "Close";
+        closeBtn.addEventListener("click", () => this.hidePanel());
+        this.closeBtn = closeBtn;
+        headerBar.appendChild(closeBtn);
+        this.element.appendChild(headerBar);
+
+        const rightResizeHandle = document.createElement("div");
+        rightResizeHandle.className = "bc-resize-handle bc-resize-handle-right";
+        rightResizeHandle.addEventListener("mousedown", (e: MouseEvent) => this.beginResize("right", e));
+        this.element.appendChild(rightResizeHandle);
+
+        const bottomResizeHandle = document.createElement("div");
+        bottomResizeHandle.className = "bc-resize-handle bc-resize-handle-bottom";
+        bottomResizeHandle.addEventListener("mousedown", (e: MouseEvent) => this.beginResize("bottom", e));
+        this.element.appendChild(bottomResizeHandle);
+
+        const cornerResizeHandle = document.createElement("div");
+        cornerResizeHandle.className = "bc-resize-handle bc-resize-handle-corner";
+        cornerResizeHandle.addEventListener("mousedown", (e: MouseEvent) => this.beginResize("corner", e));
+        this.element.appendChild(cornerResizeHandle);
 
         // ── Normal: Scrollable body ───────────────────────────────────────────
         this.normalBody = new Component();
@@ -624,9 +1091,6 @@ export default class BetterCraftingPanel extends Component {
 
         [this.scrollContent, this.normalScrollInner] = this.createScrollPort();
         this.normalBody.append(this.scrollContent);
-
-        this.normalResultsEl = this.createResultsContainer();
-        this.element.appendChild(this.normalResultsEl);
 
         // ── Normal: Footer ────────────────────────────────────────────────────
         this.normalFooter = new Component();
@@ -647,15 +1111,6 @@ export default class BetterCraftingPanel extends Component {
         this.craftBtn.event.subscribe("activate", () => this.onCraft());
         this.normalFooter.append(this.craftBtn);
 
-        const cancelBtn = new Button();
-        cancelBtn.classes.add("button-block");
-        cancelBtn.setText(TranslationImpl.generator("Cancel"));
-        cancelBtn.style.set("background", "rgba(60, 50, 40, 0.8)");
-        cancelBtn.style.set("color", "#584848");
-        cancelBtn.style.set("padding", "6px 14px");
-        cancelBtn.event.subscribe("activate", () => this.hidePanel());
-        this.normalFooter.append(cancelBtn);
-
         // ── Bulk: Scrollable body ─────────────────────────────────────────────
         this.bulkBody = new Component();
         this.bulkBody.classes.add("better-crafting-body");
@@ -674,9 +1129,6 @@ export default class BetterCraftingPanel extends Component {
         [this.bulkScrollContent, this.bulkScrollInner] = this.createScrollPort();
         this.bulkBody.append(this.bulkScrollContent);
 
-        this.bulkResultsEl = this.createResultsContainer();
-        this.element.appendChild(this.bulkResultsEl);
-
         // ── Bulk: Footer ──────────────────────────────────────────────────────
         this.bulkFooter = new Component();
         this.bulkFooter.classes.add("dialog-footer");
@@ -694,8 +1146,10 @@ export default class BetterCraftingPanel extends Component {
         qtyRow.style.cssText = "display:flex;align-items:center;gap:4px;margin-right:auto;";
 
         const minusBtn = document.createElement("button");
+        minusBtn.type = "button";
         minusBtn.className = "bc-qty-btn";
         minusBtn.textContent = "−";
+        minusBtn.setAttribute("aria-label", "Decrease bulk quantity");
         minusBtn.addEventListener("mousedown", (e: MouseEvent) => {
             e.preventDefault();
             const delta = e.ctrlKey ? 100 : e.shiftKey ? 10 : 1;
@@ -706,6 +1160,7 @@ export default class BetterCraftingPanel extends Component {
         this.bulkQtyInputEl = document.createElement("input");
         this.bulkQtyInputEl.type = "number";
         this.bulkQtyInputEl.className = "bc-qty-input";
+        this.bulkQtyInputEl.setAttribute("aria-label", "Bulk quantity");
         this.bulkQtyInputEl.min = "1";
         this.bulkQtyInputEl.value = String(this.bulkQuantity);
         this.bulkQtyInputEl.addEventListener("change", () => {
@@ -725,8 +1180,10 @@ export default class BetterCraftingPanel extends Component {
         qtyRow.appendChild(this.bulkQtyInputEl);
 
         const plusBtn = document.createElement("button");
+        plusBtn.type = "button";
         plusBtn.className = "bc-qty-btn";
         plusBtn.textContent = "+";
+        plusBtn.setAttribute("aria-label", "Increase bulk quantity");
         plusBtn.addEventListener("mousedown", (e: MouseEvent) => {
             e.preventDefault();
             const delta = e.ctrlKey ? 100 : e.shiftKey ? 10 : 1;
@@ -753,21 +1210,42 @@ export default class BetterCraftingPanel extends Component {
         this.bulkProgressEl.style.cssText = "color:#9a8860;font-size:0.92em;margin-right:auto;display:none;";
         this.bulkFooter.element.appendChild(this.bulkProgressEl);
 
+        this.bulkUnsafeToggleWrap = document.createElement("div");
+        this.bulkUnsafeToggleWrap.classList.add("bc-unsafe-toggle-wrap");
+        this.bulkUnsafeToggleWrap.style.cssText = "display:flex;align-items:center;gap:4px;margin-right:4px;background:transparent;padding:0;border:0;";
+
+        const unsafeLabel = document.createElement("span");
+        unsafeLabel.classList.add("bc-unsafe-toggle-label");
+        unsafeLabel.textContent = "Unsafe";
+        unsafeLabel.style.cssText = "font-weight:bold;color:inherit;";
+        this.bulkUnsafeToggleWrap.appendChild(unsafeLabel);
+
+        this.bulkUnsafeToggleEl = new CheckButton();
+        this.bulkUnsafeToggleEl.element.classList.add("bc-unsafe-toggle-checkbox");
+        this.bulkUnsafeToggleEl.setChecked(this.unsafeCraftingEnabled, false);
+        this.bulkUnsafeToggleEl.style.set("background", "transparent");
+        this.bulkUnsafeToggleEl.style.set("background-color", "transparent");
+        this.bulkUnsafeToggleEl.style.set("border", "none");
+        this.bulkUnsafeToggleEl.style.set("box-shadow", "none");
+        this.bulkUnsafeToggleEl.style.set("padding", "0");
+        this.bulkUnsafeToggleEl.style.set("margin", "0");
+        this.bulkUnsafeToggleEl.event.subscribe("toggle", (_: unknown, checked: boolean) => {
+            this.unsafeCraftingEnabled = checked;
+        });
+        this.bulkUnsafeToggleWrap.appendChild(this.bulkUnsafeToggleEl.element);
+        const unsafeInfo = this.createInfoIcon("Unsafe", [
+            "Bypass stamina and damage safety checks for this screen.",
+        ]);
+        unsafeInfo.classList.add("bc-unsafe-toggle-info");
+        this.bulkUnsafeToggleWrap.appendChild(unsafeInfo);
+        this.bulkFooter.append(this.bulkUnsafeToggleWrap);
+
         this.bulkCraftBtnEl = new Button();
         this.bulkCraftBtnEl.classes.add("button-block", "better-crafting-craft-btn", "bc-craft-disabled");
         this.bulkCraftBtnEl.setText(TranslationImpl.generator("Bulk Craft"));
         this.bulkCraftBtnEl.style.set("padding", "6px 14px");
         this.bulkCraftBtnEl.event.subscribe("activate", () => this.onBulkCraft());
         this.bulkFooter.append(this.bulkCraftBtnEl);
-
-        const bulkCancelBtn = new Button();
-        bulkCancelBtn.classes.add("button-block");
-        bulkCancelBtn.setText(TranslationImpl.generator("Cancel"));
-        bulkCancelBtn.style.set("background", "rgba(60, 50, 40, 0.8)");
-        bulkCancelBtn.style.set("color", "#584848");
-        bulkCancelBtn.style.set("padding", "6px 14px");
-        bulkCancelBtn.event.subscribe("activate", () => this.hidePanel());
-        this.bulkFooter.append(bulkCancelBtn);
 
         // Stop Crafting button — shown during active bulk craft, hidden by default.
         this.bulkStopBtn = new Button();
@@ -807,6 +1285,7 @@ export default class BetterCraftingPanel extends Component {
 
     /** Call when the mod unloads to clean up listeners and observers. */
     public destroyListeners(): void {
+        this.destroyed = true;
         document.removeEventListener("keydown", this._onShiftDown);
         document.removeEventListener("keyup", this._onShiftUp);
         window.removeEventListener("blur", this._onBlur);
@@ -815,6 +1294,7 @@ export default class BetterCraftingPanel extends Component {
             clearTimeout(this._inventoryRefreshTimer);
             this._inventoryRefreshTimer = null;
         }
+        this._inventoryRefreshQueued = false;
         this.bcTooltipEl?.remove();
         this.bcTooltipEl = null;
         if (this._sectionResizeRafId !== undefined) {
@@ -823,6 +1303,10 @@ export default class BetterCraftingPanel extends Component {
         }
         this._sectionResizeObserver?.disconnect();
         this._sectionResizeObserver = undefined;
+    }
+
+    private canAccessElements(): boolean {
+        return !this.destroyed && !!this.element?.isConnected;
     }
 
     // ── Inventory watching ────────────────────────────────────────────────────
@@ -856,22 +1340,525 @@ export default class BetterCraftingPanel extends Component {
         }
         this._inventoryRefreshTimer = setTimeout(() => {
             this._inventoryRefreshTimer = null;
-            if (!this.panelVisible || this.bulkCrafting) return;
-            if (this.activeTab === "bulk") {
-                this._bulkContentDirty = true;
-                this.buildBulkContent();
-            } else {
-                // Rebuild normal tab; clearResults=false preserves the last craft result.
-                this.updateRecipe(this.itemType, false);
+            if (!this.panelVisible || !this.canAccessElements()) return;
+            if (this.crafting || this.bulkCrafting) {
+                this._inventoryRefreshQueued = true;
+                return;
             }
+            this.refreshVisibleCraftingViews(true);
         }, 200);
+    }
+
+    private flushQueuedInventoryRefresh(preserveScroll = true): void {
+        if (!this._inventoryRefreshQueued || !this.panelVisible || !this.canAccessElements()) return;
+        if (this.crafting || this.bulkCrafting) return;
+
+        this._inventoryRefreshQueued = false;
+        this.refreshVisibleCraftingViews(preserveScroll);
+    }
+
+    public isDismantleMode(): boolean {
+        return this.panelMode === "dismantle";
+    }
+
+    public isSameDismantleType(itemType: ItemType): boolean {
+        return this.panelMode === "dismantle" && this.dismantleSelectedItemType === itemType;
+    }
+
+    public requiresDismantleRequiredItem(): boolean {
+        return this.dismantleDescription?.required !== undefined;
+    }
+
+    public resolveDismantleRequiredSelection(): Item | undefined {
+        if (!this.dismantleDescription?.required) return this.dismantleRequiredSelection;
+
+        const items = this.findMatchingItems(this.dismantleDescription.required);
+        if (this.dismantleRequiredSelection && items.includes(this.dismantleRequiredSelection)) {
+            return this.dismantleRequiredSelection;
+        }
+
+        return items[0];
+    }
+
+    private showSelectionChangedError(message = "Your selection changed. Please reselect the items and try again."): undefined {
+        this.showMultiplayerMessage(message);
+        return undefined;
+    }
+
+    private sanitizeSelectedItems(items: Array<Item | undefined>, candidates?: readonly Item[], maxCount?: number): Item[] {
+        const candidateIds = candidates ? new Set(candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined)) : undefined;
+        const seenIds = new Set<number>();
+        const sanitized: Item[] = [];
+
+        for (const item of items) {
+            const itemId = getItemId(item);
+            if (!item || itemId === undefined || seenIds.has(itemId)) continue;
+            if (candidateIds && !candidateIds.has(itemId)) continue;
+            sanitized.push(item);
+            seenIds.add(itemId);
+            if (maxCount !== undefined && sanitized.length >= maxCount) break;
+        }
+
+        return sanitized;
+    }
+
+    private supplementSelectedItems(selectedItems: Item[], candidates: readonly Item[], maxCount: number): Item[] {
+        if (selectedItems.length >= maxCount) return selectedItems.slice(0, maxCount);
+
+        const selectedIds = new Set(selectedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+        const supplemented = [...selectedItems];
+
+        for (const item of candidates) {
+            const itemId = getItemId(item);
+            if (itemId !== undefined && selectedIds.has(itemId)) continue;
+
+            supplemented.push(item);
+            if (itemId !== undefined) selectedIds.add(itemId);
+            if (supplemented.length >= maxCount) break;
+        }
+
+        return supplemented;
+    }
+
+    private getSelectionFailureMessage(details: ISelectionFailureDetails): string {
+        const slotLabel = details.slotIndex === -1
+            ? "base component"
+            : details.slotIndex !== undefined
+                ? `${this.getTypeName(details.itemTypeOrGroup as ItemType | ItemTypeGroup)} slot`
+                : "selection";
+
+        switch (details.reason) {
+            case "baseUnavailable":
+                return "Your selected base item is no longer valid. Please reselect it and try again.";
+            case "duplicateSelection":
+                return `The same item was selected more than once for the ${slotLabel}. Please reselect that slot.`;
+            case "itemProtected":
+                return `A selected item for the ${slotLabel} is protected and can no longer be used.`;
+            case "pinnedToolUnavailable":
+                return `Your pinned tool for the ${slotLabel} is no longer usable. Bulk crafting stopped.`;
+            case "missingSelection":
+            case "itemUnavailable":
+            default:
+                return `Your selected items for the ${slotLabel} are no longer valid. Please reselect that slot.`;
+        }
+    }
+
+    private setBulkResolutionFailure(details: ISelectionFailureDetails): void {
+        this.lastBulkResolutionMessage = this.getSelectionFailureMessage(details);
+    }
+
+    public buildCraftRequestDiagnostics(request: ICraftSelectionRequest): Record<string, unknown> {
+        return {
+            requestId: request.requestId,
+            itemType: request.itemType,
+            slots: this.recipe?.components.map((component, slotIndex) => ({
+                slotIndex,
+                requiredAmount: component.requiredAmount,
+                selectedIds: request.slotSelections.find(selection => selection.slotIndex === slotIndex)?.itemIds ?? [],
+                candidateIds: this.findMatchingItems(component.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+            })) ?? [],
+            base: this.recipe?.baseComponent === undefined
+                ? undefined
+                : {
+                    selectedId: request.baseItemId,
+                    candidateIds: this.findMatchingItems(this.recipe.baseComponent).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                },
+        };
+    }
+
+    public buildCraftExecutionDiagnostics(
+        itemType: ItemType,
+        slotSelections: Iterable<readonly Item[]>,
+        base: Item | undefined,
+    ): ICraftExecutionDiagnostics {
+        const slots = [...slotSelections].map((items, slotIndex) => {
+            const component = this.recipe?.components[slotIndex];
+            const consumedItems = component
+                ? partitionSelectedItems(items, component.requiredAmount, component.consumedAmount).consumed
+                : [];
+            const splitSelection = this.splitSelectedItems.get(slotIndex);
+
+            return {
+                slotIndex,
+                requiredAmount: component?.requiredAmount,
+                consumedAmount: component?.consumedAmount,
+                selectedIds: items.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                consumedIds: consumedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                requiredIds: items.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                splitConsumedIds: splitSelection?.consumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                splitUsedIds: splitSelection?.used.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+            };
+        });
+
+        const payload = buildCraftExecutionPayload([...slotSelections], (_, slotIndex) => {
+            const component = this.recipe?.components[slotIndex];
+            return {
+                requiredAmount: component?.requiredAmount ?? 0,
+                consumedAmount: component?.consumedAmount ?? 0,
+            };
+        });
+
+        return {
+            itemType,
+            requiredIds: payload.required.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+            consumedIds: payload.consumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+            baseId: getItemId(base),
+            slots,
+        };
+    }
+
+    public buildCurrentNormalCraftSelectionState(): Record<string, unknown> {
+        return {
+            itemType: this.itemType,
+            slots: this.recipe?.components.map((component, slotIndex) => ({
+                slotIndex,
+                requiredAmount: component.requiredAmount,
+                consumedAmount: component.consumedAmount,
+                selectedIds: (this.selectedItems.get(slotIndex) ?? [])
+                    .map(item => getItemId(item))
+                    .filter((id): id is number => id !== undefined),
+                consumedIds: (this.splitSelectedItems.get(slotIndex)?.consumed ?? [])
+                    .map(item => getItemId(item))
+                    .filter((id): id is number => id !== undefined),
+                usedIds: (this.splitSelectedItems.get(slotIndex)?.used ?? [])
+                    .map(item => getItemId(item))
+                    .filter((id): id is number => id !== undefined),
+            })) ?? [],
+            baseIds: (this.selectedItems.get(-1) ?? [])
+                .map(item => getItemId(item))
+                .filter((id): id is number => id !== undefined),
+        };
+    }
+
+    public buildBulkRequestDiagnostics(request: IBulkCraftRequest): Record<string, unknown> {
+        return {
+            requestId: request.requestId,
+            itemType: request.itemType,
+            quantity: request.quantity,
+            excludedIds: request.excludedIds,
+            pinnedToolSelections: request.pinnedToolSelections.map(selection => ({
+                slotIndex: selection.slotIndex,
+                itemIds: selection.itemIds,
+                candidateIds: this.recipe?.components[selection.slotIndex]
+                    ? this.findMatchingItems(this.recipe.components[selection.slotIndex].type).map(item => getItemId(item)).filter((id): id is number => id !== undefined)
+                    : [],
+            })),
+            pinnedUsedSelections: (request.pinnedUsedSelections ?? []).map(selection => ({
+                slotIndex: selection.slotIndex,
+                itemIds: selection.itemIds,
+                candidateIds: this.recipe?.components[selection.slotIndex]
+                    ? this.findMatchingItems(this.recipe.components[selection.slotIndex].type).map(item => getItemId(item)).filter((id): id is number => id !== undefined)
+                    : [],
+            })),
+        };
+    }
+
+    private serializeSlotSelection(slotIndex: number, type: ItemType | ItemTypeGroup, requiredAmount: number): ISelectionSlotIds | undefined {
+        const component = this.recipe?.components[slotIndex];
+        const candidates = this.findMatchingItems(type);
+        let repairedItems: Item[];
+
+        if (component && this.isSplitComponent(component)) {
+            const repairedSplit = this.repairSplitSelection(slotIndex, component, candidates);
+            repairedItems = [...repairedSplit.consumed, ...repairedSplit.used];
+            if (repairedSplit.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
+                || repairedSplit.used.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) {
+                return this.showSelectionChangedError(this.getSelectionFailureMessage({
+                    reason: "itemUnavailable",
+                    slotIndex,
+                    itemTypeOrGroup: type as number,
+                    requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                    candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                }));
+            }
+
+            this.setSplitSelection(slotIndex, repairedSplit.consumed, repairedSplit.used);
+        } else {
+            const sanitizedItems = this.sanitizeSelectedItems(this.selectedItems.get(slotIndex) ?? [], candidates, requiredAmount);
+            repairedItems = this.supplementSelectedItems(sanitizedItems, candidates, requiredAmount);
+            if (repairedItems.length < requiredAmount) {
+                return this.showSelectionChangedError(this.getSelectionFailureMessage({
+                    reason: "itemUnavailable",
+                    slotIndex,
+                    itemTypeOrGroup: type as number,
+                    requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                    candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                }));
+            }
+
+            this.clearSplitSelection(slotIndex);
+            this.selectedItems.set(slotIndex, repairedItems);
+        }
+
+        if (repairedItems.length < requiredAmount) {
+            return this.showSelectionChangedError(this.getSelectionFailureMessage({
+                reason: "itemUnavailable",
+                slotIndex,
+                itemTypeOrGroup: type as number,
+                requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+            }));
+        }
+
+        return {
+            slotIndex,
+            itemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+        };
+    }
+
+    public serializeCraftSelectionRequest(requestId: number): ICraftSelectionRequest | undefined {
+        if (!this.itemType || !this.recipe) return undefined;
+
+        const slotSelections: ISelectionSlotIds[] = [];
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const selection = this.serializeSlotSelection(i, this.recipe.components[i].type, this.recipe.components[i].requiredAmount);
+            if (!selection) return undefined;
+            slotSelections.push(selection);
+        }
+
+        let baseItemId: number | undefined;
+        if (this.recipe.baseComponent !== undefined) {
+            const baseCandidates = this.findMatchingItems(this.recipe.baseComponent);
+            const sanitizedBase = this.sanitizeSelectedItems(this.selectedItems.get(-1) ?? [], baseCandidates, 1);
+            const repairedBase = this.supplementSelectedItems(sanitizedBase, baseCandidates, 1);
+            const selectedBase = repairedBase[0];
+            baseItemId = getItemId(selectedBase);
+            if (baseItemId === undefined) {
+                return this.showSelectionChangedError(this.getSelectionFailureMessage({
+                    reason: "baseUnavailable",
+                    slotIndex: -1,
+                    itemTypeOrGroup: this.recipe.baseComponent as number,
+                    candidateItemIds: baseCandidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                }));
+            }
+            this.selectedItems.set(-1, [selectedBase]);
+        }
+
+        return {
+            requestId,
+            itemType: this.itemType,
+            slotSelections,
+            baseItemId,
+        };
+    }
+
+    private resolveCurrentCraftSelection(): IResolvedNormalCraftSelection | undefined {
+        if (!this.itemType || !this.recipe) return undefined;
+
+        const slotSelections = new Map<number, Item[]>();
+
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const component = this.recipe.components[i];
+            const candidates = this.findMatchingItems(component.type);
+            let repairedItems: Item[];
+            if (this.isSplitComponent(component)) {
+                const repairedSplit = this.repairSplitSelection(i, component, candidates);
+                repairedItems = [...repairedSplit.consumed, ...repairedSplit.used];
+                if (repairedSplit.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
+                    || repairedSplit.used.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) {
+                    return this.showSelectionChangedError(this.getSelectionFailureMessage({
+                        reason: "itemUnavailable",
+                        slotIndex: i,
+                        itemTypeOrGroup: component.type as number,
+                        requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                        candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                    }));
+                }
+
+                this.setSplitSelection(i, repairedSplit.consumed, repairedSplit.used);
+            } else {
+                const sanitizedItems = this.sanitizeSelectedItems(this.selectedItems.get(i) ?? [], candidates, component.requiredAmount);
+                repairedItems = this.supplementSelectedItems(sanitizedItems, candidates, component.requiredAmount);
+                if (repairedItems.length < component.requiredAmount) {
+                    return this.showSelectionChangedError(this.getSelectionFailureMessage({
+                        reason: "itemUnavailable",
+                        slotIndex: i,
+                        itemTypeOrGroup: component.type as number,
+                        requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                        candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                    }));
+                }
+
+                this.clearSplitSelection(i);
+                this.selectedItems.set(i, repairedItems);
+            }
+            if (repairedItems.length < component.requiredAmount) {
+                return this.showSelectionChangedError(this.getSelectionFailureMessage({
+                    reason: "itemUnavailable",
+                    slotIndex: i,
+                    itemTypeOrGroup: component.type as number,
+                    requestedItemIds: repairedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                    candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                }));
+            }
+            slotSelections.set(i, repairedItems);
+        }
+
+        let base: Item | undefined;
+        if (this.recipe.baseComponent !== undefined) {
+            const baseCandidates = this.findMatchingItems(this.recipe.baseComponent);
+            const sanitizedBase = this.sanitizeSelectedItems(this.selectedItems.get(-1) ?? [], baseCandidates, 1);
+            const repairedBase = this.supplementSelectedItems(sanitizedBase, baseCandidates, 1);
+            base = repairedBase[0];
+            if (!base) {
+                return this.showSelectionChangedError(this.getSelectionFailureMessage({
+                    reason: "baseUnavailable",
+                    slotIndex: -1,
+                    itemTypeOrGroup: this.recipe.baseComponent as number,
+                    candidateItemIds: baseCandidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                }));
+            }
+
+            this.selectedItems.set(-1, [base]);
+        }
+
+        const orderedSelections = this.recipe.components.map((_, slotIndex) => slotSelections.get(slotIndex) ?? []);
+        const payload = buildCraftExecutionPayload(orderedSelections, (_, slotIndex) => ({
+            requiredAmount: this.recipe?.components[slotIndex].requiredAmount ?? 0,
+            consumedAmount: this.recipe?.components[slotIndex].consumedAmount ?? 0,
+        }));
+        const diagnostics = this.buildCraftExecutionDiagnostics(this.itemType, orderedSelections, base);
+        this.debugLog("NormalCraftResolved", diagnostics);
+
+        return {
+            required: payload.required,
+            consumed: payload.consumed,
+            base,
+            slotSelections,
+        };
+    }
+
+    public serializeBulkCraftRequest(requestId: number, quantity: number): IBulkCraftRequest | undefined {
+        if (!this.itemType || !this.recipe) return undefined;
+
+        const excludedIds = [...this.getBulkExcludedIds()];
+        if (!this.prepareBulkPinnedSelections(new Set<number>(excludedIds))) return this.showSelectionChangedError();
+
+        for (const [slotIndex, items] of this.bulkPinnedToolSelections) {
+            const component = this.recipe.components[slotIndex];
+            if (!component) continue;
+
+            const candidates = this.findMatchingItems(component.type);
+            const sanitized = this.sanitizeSelectedItems(items, candidates, component.requiredAmount);
+            if (sanitized.length < component.requiredAmount) return this.showSelectionChangedError();
+            this.bulkPinnedToolSelections.set(slotIndex, sanitized);
+        }
+
+        for (const [slotIndex, items] of this.bulkPinnedUsedSelections) {
+            const component = this.recipe.components[slotIndex];
+            if (!component) continue;
+
+            const candidates = this.findMatchingItems(component.type).filter(candidate => {
+                const candidateId = getItemId(candidate);
+                return candidateId === undefined || !(this.bulkExcludedIds.get(slotIndex)?.has(candidateId) ?? false);
+            });
+            const sanitized = this.sanitizeSelectedItems(items, candidates, getUsedSelectionCount(component.requiredAmount, component.consumedAmount));
+            if (sanitized.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) return this.showSelectionChangedError();
+            this.bulkPinnedUsedSelections.set(slotIndex, sanitized);
+        }
+
+        return {
+            requestId,
+            itemType: this.itemType,
+            quantity,
+            excludedIds,
+            pinnedToolSelections: [...this.bulkPinnedToolSelections.entries()].map(([slotIndex, items]) => ({
+                slotIndex,
+                itemIds: items.map(getItemId).filter((id): id is number => id !== undefined),
+            })),
+            pinnedUsedSelections: [...this.bulkPinnedUsedSelections.entries()].map(([slotIndex, items]) => ({
+                slotIndex,
+                itemIds: items.map(getItemId).filter((id): id is number => id !== undefined),
+            })),
+            unsafeCrafting: this.unsafeCraftingEnabled,
+        };
+    }
+
+    public serializeDismantleRequest(requestId: number, quantity: number): IDismantleRequest | undefined {
+        if (!this.dismantleSelectedItemType || !this.dismantleDescription) return undefined;
+
+        const targets = this.sanitizeSelectedItems(this.getIncludedDismantleItems().slice(0, quantity), this.findMatchingItems(this.dismantleSelectedItemType), quantity);
+        const targetItemIds = targets.map(getItemId).filter((id): id is number => id !== undefined);
+        if (targetItemIds.length === 0) return this.showSelectionChangedError();
+
+        let requiredItemId: number | undefined;
+        if (this.dismantleRequiredSelection) {
+            const requiredCandidates = this.dismantleDescription.required ? this.findMatchingItems(this.dismantleDescription.required) : undefined;
+            const sanitizedRequired = this.sanitizeSelectedItems([this.dismantleRequiredSelection], requiredCandidates, 1);
+            const requiredItem = sanitizedRequired[0];
+            requiredItemId = getItemId(requiredItem);
+            if (requiredItemId === undefined) return this.showSelectionChangedError();
+            this.dismantleRequiredSelection = requiredItem;
+        }
+
+        return {
+            requestId,
+            itemType: this.dismantleSelectedItemType,
+            targetItemIds,
+            requiredItemId,
+        };
+    }
+
+    public openDismantle(item: Item): void {
+        const itemType = item.type as ItemType;
+        const dismantle = itemDescriptions[itemType]?.dismantle;
+        if (!dismantle) return;
+
+        if (this.panelMode === "dismantle" && this.dismantleSelectedItemType === itemType) {
+            return;
+        }
+
+        this.panelMode = "dismantle";
+        this.dismantleSelectedItemType = itemType;
+        this.dismantleDescription = dismantle;
+        this.bulkQuantity = 1;
+        this.dismantleExcludedIds.clear();
+        this.dismantleRequiredSelection = undefined;
+        this.preserveDismantleRequiredDurability = true;
+        this.resetUnsafeCraftingEnabled();
+        this.buildDismantleContent();
+    }
+
+    private applyPanelModeLayout(): void {
+        if (!this.canAccessElements()) return;
+
+        if (this.panelMode === "dismantle") {
+            this.tabBar.style.display = "none";
+            this.closeBtn.style.display = "";
+            this.normalBody.style.set("display", "none");
+            this.normalFooter.style.set("display", "none");
+            this.bulkBody.style.set("display", "flex");
+            this.bulkFooter.style.set("display", "flex");
+            this.element.classList.remove("bc-panel-bulk");
+            this.element.classList.add("bc-panel-dismantle");
+            this.bulkCraftBtnEl?.setText(TranslationImpl.generator("Dismantle"));
+            return;
+        }
+
+        this.tabBar.style.display = "";
+        this.closeBtn.style.display = "";
+        this.element.classList.remove("bc-panel-dismantle");
+        this.bulkCraftBtnEl?.setText(TranslationImpl.generator("Bulk Craft"));
+        if (this.activeTab === "bulk") {
+            this.normalBody.style.set("display", "none");
+            this.normalFooter.style.set("display", "none");
+            this.bulkBody.style.set("display", "flex");
+            this.bulkFooter.style.set("display", "flex");
+            this.element.classList.add("bc-panel-bulk");
+        } else {
+            this.normalBody.style.set("display", "flex");
+            this.normalFooter.style.set("display", "flex");
+            this.bulkBody.style.set("display", "none");
+            this.bulkFooter.style.set("display", "none");
+            this.element.classList.remove("bc-panel-bulk");
+        }
     }
 
     // ── Tab switching ─────────────────────────────────────────────────────────
 
     private switchTab(tab: "normal" | "bulk"): void {
+        if (this.panelMode === "dismantle") return;
         if (this.activeTab === tab) {
-            this.syncResultsVisibility();
             return;
         }
         this.activeTab = tab;
@@ -896,19 +1883,19 @@ export default class BetterCraftingPanel extends Component {
                 this.buildBulkContent();
             }
         }
-        this.syncResultsVisibility();
     }
 
     public showPanel() {
         const wasVisible = this.panelVisible;
 
-        // Default to normal tab only when opening fresh; preserve active tab when a recipe
-        // changes while the dialog is already open (e.g. clicking a different recipe).
         if (!wasVisible) {
-            this.switchTab("normal");
+            if (this.panelMode === "craft") {
+                this.switchTab("normal");
+            }
             this._subscribeInventoryWatch();
         }
 
+        this.applyPanelModeLayout();
         this.style.set("display", "flex");
         this.updateHighlights();
     }
@@ -916,17 +1903,29 @@ export default class BetterCraftingPanel extends Component {
     public hidePanel() {
         // If a bulk craft is active, abort it before hiding.
         if (this.bulkCrafting) this.onBulkAbortCallback?.();
+        this.onPanelHideCallback?.();
         // Stop watching inventory — no point refreshing a hidden dialog.
         this._unsubscribeInventoryWatch();
         if (this._inventoryRefreshTimer !== null) {
             clearTimeout(this._inventoryRefreshTimer);
             this._inventoryRefreshTimer = null;
         }
-        // Reset exclusion state so the next open starts clean.
         this.bulkExcludedIds.clear();
+        this.bulkPreserveDurabilityBySlot.clear();
+        this.bulkPinnedToolSelections.clear();
+        this.bulkPinnedUsedSelections.clear();
+        this.dismantleExcludedIds.clear();
         this._lastBulkItemType = 0;
-        this.clearResults();
+        this.dismantleDescription = undefined;
+        this.dismantleRequiredSelection = undefined;
+        this.dismantleSelectedItemType = undefined;
+        this.preserveDismantleRequiredDurability = true;
+        this.resetUnsafeCraftingEnabled();
+        this.resetHelpBoxStates();
+        this.panelMode = "craft";
+        this.applyPanelModeLayout();
         this.style.set("display", "none");
+        this._inventoryRefreshQueued = false;
         this.clearHighlights();
         this.bcHideTooltip();
     }
@@ -941,21 +1940,27 @@ export default class BetterCraftingPanel extends Component {
         this.onBulkAbortCallback = cb;
     }
 
+    public setPanelHideCallback(cb: (() => void) | null): void {
+        this.onPanelHideCallback = cb;
+    }
+
     /** Swap UI to "in-progress" state: hide craft controls, show stop button and progress. */
-    public onBulkCraftStart(total: number): void {
+    public onBulkCraftStart(total: number, verb = "Crafting"): void {
+        this.bulkProgressVerb = verb;
         if (this.bulkCraftBtnEl) this.bulkCraftBtnEl.style.set("display", "none");
+        if (this.bulkUnsafeToggleWrap) this.bulkUnsafeToggleWrap.style.display = "none";
         if (this.bulkQtyRow) this.bulkQtyRow.style.display = "none";
         if (this.bulkProgressEl) {
-            this.bulkProgressEl.textContent = `Crafting 0 / ${total}`;
+            this.bulkProgressEl.textContent = `${verb} 0 / ${total}`;
             this.bulkProgressEl.style.display = "";
         }
         if (this.bulkStopBtn) this.bulkStopBtn.style.set("display", "");
     }
 
     /** Update the progress label after each craft iteration. */
-    public setBulkProgress(current: number, total: number): void {
+    public setBulkProgress(current: number, total: number, verb = this.bulkProgressVerb): void {
         if (this.bulkProgressEl) {
-            this.bulkProgressEl.textContent = `Crafting ${current} / ${total}`;
+            this.bulkProgressEl.textContent = `${verb} ${current} / ${total}`;
         }
     }
 
@@ -964,26 +1969,35 @@ export default class BetterCraftingPanel extends Component {
         if (this.bulkStopBtn) this.bulkStopBtn.style.set("display", "none");
         if (this.bulkProgressEl) this.bulkProgressEl.style.display = "none";
         if (this.bulkCraftBtnEl) this.bulkCraftBtnEl.style.set("display", "");
+        if (this.bulkUnsafeToggleWrap) this.bulkUnsafeToggleWrap.style.display = "";
         if (this.bulkQtyRow) this.bulkQtyRow.style.display = "";
         this._bulkContentDirty = true;
-        if (this.panelVisible) this.buildBulkContent();
+        this.flushQueuedInventoryRefresh();
     }
 
     // ── Highlight helpers ─────────────────────────────────────────────────────
 
     private updateHighlights() {
         this.clearHighlights();
-        if (!this.recipe) return;
         const selectors: HighlightSelector[] = [];
-        for (const component of this.recipe.components) {
-            selectors.push(ItemManager.isGroup(component.type)
-                ? [HighlightType.ItemGroup, component.type]
-                : [HighlightType.ItemType, component.type]);
-        }
-        if (this.recipe!.baseComponent !== undefined) {
-            selectors.push(ItemManager.isGroup(this.recipe.baseComponent)
-                ? [HighlightType.ItemGroup, this.recipe.baseComponent]
-                : [HighlightType.ItemType, this.recipe.baseComponent]);
+        if (this.panelMode === "dismantle") {
+            if (this.dismantleSelectedItemType !== undefined) {
+                selectors.push([HighlightType.ItemType, this.dismantleSelectedItemType]);
+            }
+            if (this.dismantleDescription?.required !== undefined) {
+                selectors.push([HighlightType.ItemGroup, this.dismantleDescription.required]);
+            }
+        } else if (this.recipe) {
+            for (const component of this.recipe.components) {
+                selectors.push(ItemManager.isGroup(component.type)
+                    ? [HighlightType.ItemGroup, component.type]
+                    : [HighlightType.ItemType, component.type]);
+            }
+            if (this.recipe.baseComponent !== undefined) {
+                selectors.push(ItemManager.isGroup(this.recipe.baseComponent)
+                    ? [HighlightType.ItemGroup, this.recipe.baseComponent]
+                    : [HighlightType.ItemType, this.recipe.baseComponent]);
+            }
         }
         if (selectors.length > 0) ui?.highlights?.start(this, { selectors } as IHighlight);
     }
@@ -994,23 +2008,24 @@ export default class BetterCraftingPanel extends Component {
 
     // ── Recipe rendering ──────────────────────────────────────────────────────
 
-    public updateRecipe(itemType: number, clearResults = true) {
+    public updateRecipe(itemType: number, clearResults = true, preserveScroll = false) {
+        this.panelMode = "craft";
+        this.applyPanelModeLayout();
         this.itemType = itemType;
-        const pendingIds = this._pendingSelectionIds;
+        const pendingIds = clearResults ? this._pendingSelectionIds : (this._pendingSelectionIds ?? this.collectCurrentNormalSelectionIds());
+        const pendingSplitIds = clearResults ? this._pendingSplitSelectionIds : (this._pendingSplitSelectionIds ?? this.collectCurrentSplitSelectionIds());
         this._pendingSelectionIds = null;
+        this._pendingSplitSelectionIds = null;
 
         this.selectedItems.clear();
-        this.sectionCounters.clear();
-        this.normalStaticContent.dump();
-        this.normalScrollInner.dump();
+        this.splitSelectedItems.clear();
+        this.splitSelectedItems.clear();
 
         const desc = itemDescriptions[itemType as ItemType];
         this.recipe = desc?.recipe;
 
         // Mark bulk content dirty whenever recipe changes.
         this._bulkContentDirty = true;
-        if (clearResults) this.clearResults();
-
         if (!this.recipe) {
             const noRecipe = new Text();
             noRecipe.setText(TranslationImpl.generator("No recipe found for this item."));
@@ -1029,37 +2044,242 @@ export default class BetterCraftingPanel extends Component {
         for (let i = 0; i < this.recipe.components.length; i++) {
             const component = this.recipe.components[i];
             const items = this.findMatchingItems(component.type);
+            if (this.isSplitComponent(component)) {
+                const repairedSplit = this.repairSplitSelection(i, component, items, pendingSplitIds?.get(i));
+                if (repairedSplit.consumed.length || repairedSplit.used.length) {
+                    this.setSplitSelection(i, repairedSplit.consumed, repairedSplit.used);
+                }
+                continue;
+            }
+
             const pre = this.getPreSelectedItems(items, component.requiredAmount, pendingIds);
-            if (pre.length) this.selectedItems.set(i, pre);
+            if (pre.length) {
+                this.clearSplitSelection(i);
+                this.selectedItems.set(i, pre);
+            }
         }
 
-        this.buildOutputCard(itemType as ItemType, this.recipe, false);
-        if (this.recipe.baseComponent !== undefined) this.addBaseComponentSection(this.recipe.baseComponent);
-        for (let i = 0; i < this.recipe.components.length; i++) this.addComponentSection(i, this.recipe.components[i]);
-
-        this.updateCraftButtonState();
+        this.rebuildNormalContent(preserveScroll);
 
         // If currently on bulk tab, rebuild it immediately.
         if (this.activeTab === "bulk") {
-            this.buildBulkContent();
+            this.buildBulkContent(preserveScroll, true);
         }
+    }
+
+    public refreshNormalCraftView(preserveScroll = true, preserveSelections = true): void {
+        if (this.itemType === undefined) return;
+
+        if (preserveSelections) {
+            this._pendingSelectionIds = this.collectCurrentNormalSelectionIds();
+            this._pendingSplitSelectionIds = this.collectCurrentSplitSelectionIds();
+        }
+
+        this.updateRecipe(this.itemType, !preserveSelections, preserveScroll);
+    }
+
+    public refreshBulkCraftView(preserveScroll = true, preserveQuantity = true, preserveSelections = true): void {
+        if (!this.recipe) return;
+
+        if (!preserveSelections) {
+            this.bulkExcludedIds.clear();
+            this.bulkPreserveDurabilityBySlot.clear();
+            this.bulkPinnedToolSelections.clear();
+            this.bulkPinnedUsedSelections.clear();
+        }
+
+        this._bulkContentDirty = true;
+        this.buildBulkContent(preserveScroll, preserveQuantity);
+    }
+
+    public refreshDismantleView(preserveScroll = true, preserveQuantity = true, preserveSelections = true): void {
+        if (!preserveSelections) {
+            this.dismantleExcludedIds.clear();
+            this.dismantleRequiredSelection = undefined;
+        }
+
+        this.buildDismantleContent(preserveScroll);
+        if (!preserveQuantity) {
+            this.bulkQuantity = 1;
+            if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = "1";
+            this.updateBulkMaxDisplay();
+            this.updateBulkCraftBtnState();
+        }
+    }
+
+    public refreshVisibleCraftingViews(preserveScroll = true): void {
+        if (this.panelMode === "dismantle") {
+            this.refreshDismantleView(preserveScroll, true, true);
+            return;
+        }
+
+        this.refreshNormalCraftView(preserveScroll, true);
+        if (this.activeTab !== "bulk" && this.bulkCrafting) {
+            this.refreshBulkCraftView(preserveScroll, true, true);
+        }
+    }
+
+    private rebuildNormalContent(preserveScroll = false): void {
+        const scrollTop = preserveScroll ? this.scrollContent.element.scrollTop : 0;
+        const scrollLeft = preserveScroll ? this.scrollContent.element.scrollLeft : 0;
+
+        this.sectionCounters.clear();
+        this.normalStaticContent.dump();
+        this.normalScrollInner.dump();
+
+        if (!this.recipe) {
+            const noRecipe = new Text();
+            noRecipe.setText(TranslationImpl.generator("No recipe found for this item."));
+            noRecipe.style.set("color", "#ff6666");
+            this.normalScrollInner.append(noRecipe);
+            this.updateCraftButtonState();
+            this.restoreScrollPosition(this.scrollContent, scrollTop, scrollLeft, preserveScroll);
+            return;
+        }
+
+        this.buildOutputCard(this.itemType as ItemType, this.recipe, false);
+        this.addNormalHelpBox();
+        if (this.recipe.baseComponent !== undefined) this.addBaseComponentSection(this.recipe.baseComponent);
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const component = this.recipe.components[i];
+            if (component.consumedAmount > 0) {
+                this.addComponentSection(i, component, "consumed");
+            }
+        }
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const component = this.recipe.components[i];
+            if (this.isSplitComponent(component)) {
+                this.addComponentSection(i, component, "used");
+            }
+        }
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const component = this.recipe.components[i];
+            if (component.consumedAmount <= 0) {
+                this.addComponentSection(i, component, "tool");
+            }
+        }
+
+        this.updateCraftButtonState();
+        this.restoreScrollPosition(this.scrollContent, scrollTop, scrollLeft, preserveScroll);
+    }
+
+    private restoreScrollPosition(port: Component, scrollTop: number, scrollLeft = 0, preserveScroll = false): void {
+        if (!preserveScroll) return;
+        requestAnimationFrame(() => {
+            if (!this.canAccessElements() || !port.element?.isConnected) return;
+            port.element.scrollTop = scrollTop;
+            port.element.scrollLeft = scrollLeft;
+        });
     }
 
     // ── Pre-selection helper ──────────────────────────────────────────────────
 
     private getPreSelectedItems(items: Item[], maxCount: number, pendingIds: Set<number> | null): Item[] {
         if (pendingIds !== null) {
-            const restored = items.filter(item => pendingIds.has(getItemId(item)));
+            const restored = items.filter(item => {
+                const itemId = getItemId(item);
+                return itemId !== undefined && pendingIds.has(itemId);
+            });
             if (restored.length >= maxCount) return restored.slice(0, maxCount);
             // Some previously-selected items survive (e.g. tool slots) but not enough to fill
             // the requirement — supplement with other available items rather than returning short.
             if (restored.length > 0) {
-                const restoredIds = new Set(restored.map(item => getItemId(item)));
-                const extras = items.filter(item => !restoredIds.has(getItemId(item)));
+                const restoredIds = new Set(restored.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+                const extras = items.filter(item => {
+                    const itemId = getItemId(item);
+                    return itemId === undefined || !restoredIds.has(itemId);
+                });
                 return [...restored, ...extras].slice(0, maxCount);
             }
         }
         return items.slice(0, maxCount);
+    }
+
+    private isSplitComponent(component: IRecipeComponent): boolean {
+        return isSplitConsumption(component.requiredAmount, component.consumedAmount);
+    }
+
+    private getSplitSelection(slotIndex: number): INormalSplitSelection {
+        return this.splitSelectedItems.get(slotIndex) ?? { consumed: [], used: [] };
+    }
+
+    private setSplitSelection(slotIndex: number, consumed: Item[], used: Item[]): void {
+        const nextSelection = { consumed: [...consumed], used: [...used] };
+        this.splitSelectedItems.set(slotIndex, nextSelection);
+        this.selectedItems.set(slotIndex, [...nextSelection.consumed, ...nextSelection.used]);
+    }
+
+    private clearSplitSelection(slotIndex: number): void {
+        this.splitSelectedItems.delete(slotIndex);
+    }
+
+    private collectCurrentSplitSelectionIds(): Map<number, { consumedIds: number[]; usedIds: number[] }> {
+        const pending = new Map<number, { consumedIds: number[]; usedIds: number[] }>();
+        for (const [slotIndex, selection] of this.splitSelectedItems) {
+            pending.set(slotIndex, {
+                consumedIds: selection.consumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                usedIds: selection.used.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+            });
+        }
+
+        return pending;
+    }
+
+    private repairSplitSelection(
+        slotIndex: number,
+        component: IRecipeComponent,
+        candidates: readonly Item[],
+        pendingSplitIds?: { consumedIds: number[]; usedIds: number[] },
+    ): INormalSplitSelection {
+        const consumedCount = getConsumedSelectionCount(component.requiredAmount, component.consumedAmount);
+        const usedCount = getUsedSelectionCount(component.requiredAmount, component.consumedAmount);
+        const current = pendingSplitIds
+            ? {
+                consumed: candidates.filter(item => {
+                    const itemId = getItemId(item);
+                    return itemId !== undefined && pendingSplitIds.consumedIds.includes(itemId);
+                }),
+                used: candidates.filter(item => {
+                    const itemId = getItemId(item);
+                    return itemId !== undefined && pendingSplitIds.usedIds.includes(itemId);
+                }),
+            }
+            : this.getSplitSelection(slotIndex);
+
+        const consumed = this.sanitizeSelectedItems(current.consumed, candidates, consumedCount);
+        const consumedIds = new Set(consumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+        const usedCandidates = candidates.filter(item => {
+            const itemId = getItemId(item);
+            return itemId === undefined || !consumedIds.has(itemId);
+        });
+        const used = this.sanitizeSelectedItems(current.used, usedCandidates, usedCount);
+
+        const repairedConsumed = this.supplementSelectedItems(consumed, candidates, consumedCount);
+        const repairedConsumedIds = new Set(repairedConsumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+        const repairedUsedCandidates = candidates.filter(item => {
+            const itemId = getItemId(item);
+            return itemId === undefined || !repairedConsumedIds.has(itemId);
+        });
+        const repairedUsed = this.supplementSelectedItems(used, repairedUsedCandidates, usedCount);
+
+        return {
+            consumed: repairedConsumed,
+            used: repairedUsed,
+        };
+    }
+
+    private collectCurrentNormalSelectionIds(): Set<number> {
+        const pendingIds = new Set<number>();
+        for (const [, items] of this.selectedItems) {
+            for (const item of items) {
+                const itemId = getItemId(item);
+                if (itemId !== undefined) {
+                    pendingIds.add(itemId);
+                }
+            }
+        }
+
+        return pendingIds;
     }
 
     // ── Text formatting ───────────────────────────────────────────────────────
@@ -1079,7 +2299,18 @@ export default class BetterCraftingPanel extends Component {
         let met = true;
         if (this.recipe) {
             for (let i = 0; i < this.recipe.components.length; i++) {
-                if ((this.selectedItems.get(i) || []).length < this.recipe.components[i].requiredAmount) {
+                const component = this.recipe.components[i];
+                if (this.isSplitComponent(component)) {
+                    const splitSelection = this.getSplitSelection(i);
+                    if (splitSelection.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
+                        || splitSelection.used.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) {
+                        met = false;
+                        break;
+                    }
+                    continue;
+                }
+
+                if ((this.selectedItems.get(i) || []).length < component.requiredAmount) {
                     met = false; break;
                 }
             }
@@ -1098,10 +2329,15 @@ export default class BetterCraftingPanel extends Component {
 
     // ── Counter updates ───────────────────────────────────────────────────────
 
-    private updateCounter(slotIndex: number, maxSelect: number) {
-        const counter = this.sectionCounters.get(slotIndex);
+    private updateCounter(slotIndex: number, maxSelect: number, semantic: SectionSemantic = "base") {
+        const counter = this.sectionCounters.get(getSectionCounterKey(slotIndex, semantic));
         if (!counter) return;
-        const count = (this.selectedItems.get(slotIndex) || []).length;
+        let count = (this.selectedItems.get(slotIndex) || []).length;
+        if (semantic === "consumed") {
+            count = this.getSplitSelection(slotIndex).consumed.length;
+        } else if (semantic === "used") {
+            count = this.getSplitSelection(slotIndex).used.length;
+        }
         counter.setText(TranslationImpl.generator(`${count}/${maxSelect}`));
         counter.style.set("color", count >= maxSelect ? "#33ff99" : "#c8bc8a");
         this.updateCraftButtonState();
@@ -1142,15 +2378,12 @@ export default class BetterCraftingPanel extends Component {
         })();
         const nameSpan = document.createElement("span");
         nameSpan.textContent = itemName;
-        nameSpan.style.cssText = "color:#d4c89a;font-weight:600;font-size:1.2em;flex-shrink:0;";
+        const cardTheme = isBulk ? SCREEN_THEME.bulk : SCREEN_THEME.normal;
+        nameSpan.style.cssText = `color:${cardTheme.title};font-weight:600;font-size:1.2em;flex-shrink:0;`;
         row1.appendChild(nameSpan);
 
-        const inlineStat = (label: string, value: string) => {
-            const s = document.createElement("span");
-            s.style.cssText = "color:#9a8860;font-size:0.9em;white-space:nowrap;";
-            s.innerHTML = `${label}: <span style="color:#c0b080">${value}</span>`;
-            row1.appendChild(s);
-        };
+        const inlineStat = (label: string, value: string) =>
+            appendInlineStat(row1, label, value, cardTheme.accent, `color:${cardTheme.body};font-size:0.9em;white-space:nowrap;`);
 
         inlineStat("Difficulty", fmt(RecipeLevel[recipe.level] ?? String(recipe.level)));
         inlineStat("Skill", fmt(SkillType[recipe.skill] ?? String(recipe.skill)));
@@ -1163,26 +2396,22 @@ export default class BetterCraftingPanel extends Component {
         card.element.appendChild(row1);
 
         if (desc?.group && desc.group.length > 0) {
-            const groupLine = document.createElement("div");
-            groupLine.style.cssText = "font-size:0.85em;color:#9a8860;";
             const parts = desc.group.map(g => {
                 const tierNum = (desc as any)?.tier?.[g] as number | undefined;
                 const tierStr = tierNum !== undefined && tierNum > 0 ? ` ${toRoman(tierNum)}` : "";
-                return `<span style="color:#c0b080">${fmt(ItemTypeGroup[g] || `Group ${g}`)}${tierStr}</span>`;
+                return `${fmt(ItemTypeGroup[g] || `Group ${g}`)}${tierStr}`;
             });
-            groupLine.innerHTML = `Groupings: ${parts.join(", ")}`;
+            const groupLine = createColoredListLine("Groupings", parts, cardTheme.accent, `font-size:0.85em;color:${cardTheme.body};`);
             card.element.appendChild(groupLine);
         }
 
         if (desc?.use && desc.use.length > 0) {
-            const useLine = document.createElement("div");
-            useLine.style.cssText = "font-size:0.85em;color:#9a8860;";
             const parts = desc.use.map(u => {
                 const tierNum = (desc as any)?.actionTier?.[u] as number | undefined;
                 const tierStr = tierNum !== undefined && tierNum > 0 ? ` ${toRoman(tierNum)}` : "";
-                return `<span style="color:#c0b080">${fmt(ActionType[u] || `Action ${u}`)}${tierStr}</span>`;
+                return `${fmt(ActionType[u] || `Action ${u}`)}${tierStr}`;
             });
-            useLine.innerHTML = `Uses: ${parts.join(", ")}`;
+            const useLine = createColoredListLine("Uses", parts, cardTheme.accent, `font-size:0.85em;color:${cardTheme.body};`);
             card.element.appendChild(useLine);
         }
 
@@ -1199,16 +2428,77 @@ export default class BetterCraftingPanel extends Component {
         }
     }
 
+    private getSemanticTooltip(semantic: Exclude<SectionSemantic, "base">): { title: string; lines: string[] } {
+        switch (semantic) {
+            case "consumed":
+                return {
+                    title: "Consumed",
+                    lines: [
+                        "Consumed items are destroyed when you complete this action.",
+                        "You must choose the exact items that will be consumed.",
+                    ],
+                };
+            case "used":
+                return {
+                    title: "Used",
+                    lines: [
+                        "Used items are required for this action but are not consumed.",
+                        "They remain after the action and lose durability as normal.",
+                    ],
+                };
+            case "tool":
+            default:
+                return {
+                    title: "Tool",
+                    lines: [
+                        "Tool items are required for this action and are not consumed.",
+                        "They remain after the action and lose durability as normal.",
+                    ],
+                };
+        }
+    }
+
+    private appendSectionHeader(
+        labelRow: Component,
+        titleText: string,
+        availableCount: number,
+        semantic: SectionSemantic,
+    ): void {
+        const left = document.createElement("div");
+        left.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;";
+
+        const title = document.createElement("span");
+        title.textContent = titleText;
+        title.style.cssText = "font-weight:bold;";
+        left.appendChild(title);
+
+        if (semantic !== "base") {
+            const semanticWrap = document.createElement("span");
+            semanticWrap.style.cssText = "display:inline-flex;align-items:center;gap:2px;color:#c8bc8a;font-size:0.92em;";
+
+            const semanticLabel = document.createElement("span");
+            semanticLabel.textContent = semantic.charAt(0).toUpperCase() + semantic.slice(1);
+            semanticWrap.appendChild(semanticLabel);
+
+            const tooltip = this.getSemanticTooltip(semantic);
+            semanticWrap.appendChild(this.createInfoIcon(tooltip.title, tooltip.lines));
+            left.appendChild(semanticWrap);
+        }
+
+        const available = document.createElement("span");
+        available.textContent = `(${availableCount} available)`;
+        available.style.cssText = "color:#c8bc8a;font-size:0.92em;";
+        left.appendChild(available);
+
+        labelRow.element.appendChild(left);
+    }
+
     private addBaseComponentSection(baseType: ItemType | ItemTypeGroup) {
         const section = this.createSection();
         const labelRow = this.createLabelRow();
 
         const items = this.findMatchingItems(baseType);
-        const label = new Text();
-        label.classes.add("better-crafting-heading");
-        label.setText(TranslationImpl.generator(`Base: ${this.getTypeName(baseType)} (${items.length} available)`));
-        label.style.set("font-weight", "bold");
-        labelRow.append(label);
+        this.appendSectionHeader(labelRow, `Base: ${this.getTypeName(baseType)}`, items.length, "base");
 
         const counter = new Text();
         counter.setText(TranslationImpl.generator("0/1"));
@@ -1216,7 +2506,7 @@ export default class BetterCraftingPanel extends Component {
         counter.style.set("font-size", "0.9em");
         counter.style.set("margin-left", "8px");
         labelRow.append(counter);
-        this.sectionCounters.set(-1, counter);
+        this.sectionCounters.set(getSectionCounterKey(-1, "base"), counter);
         section.append(labelRow);
 
         const itemsContainer = this.createItemsContainer();
@@ -1226,24 +2516,35 @@ export default class BetterCraftingPanel extends Component {
         } else {
             for (const item of items) this.addItemRow(itemsContainer, -1, item, 1);
         }
-        this.updateCounter(-1, 1);
+        this.updateCounter(-1, 1, "base");
         this.normalScrollInner.append(section);
     }
 
-    private addComponentSection(index: number, component: IRecipeComponent) {
+    private addComponentSection(index: number, component: IRecipeComponent, semantic: SectionSemantic) {
         const section = this.createSection();
-        const consumed  = component.consumedAmount > 0;
-        const maxSelect = component.requiredAmount;
         const labelRow  = this.createLabelRow();
-
+        const split = this.isSplitComponent(component);
+        const maxSelect = semantic === "used"
+            ? getUsedSelectionCount(component.requiredAmount, component.consumedAmount)
+            : semantic === "consumed"
+                ? getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
+                : component.requiredAmount;
         const items = this.findMatchingItems(component.type);
-        const label = new Text();
-        label.classes.add("better-crafting-heading");
-        label.setText(TranslationImpl.generator(
-            `${this.getTypeName(component.type)} \u00d7${maxSelect}${consumed ? " (consumed)" : " (tool)"} (${items.length} available)`
-        ));
-        label.style.set("font-weight", "bold");
-        labelRow.append(label);
+        const availableCount = split && semantic === "used"
+            ? items.filter(item => {
+                const itemId = getItemId(item);
+                const consumedIds = new Set(this.getSplitSelection(index).consumed.map(selected => getItemId(selected)).filter((id): id is number => id !== undefined));
+                return itemId === undefined || !consumedIds.has(itemId);
+            }).length
+            : split && semantic === "consumed"
+                ? items.filter(item => {
+                    const itemId = getItemId(item);
+                    const usedIds = new Set(this.getSplitSelection(index).used.map(selected => getItemId(selected)).filter((id): id is number => id !== undefined));
+                    return itemId === undefined || !usedIds.has(itemId);
+                }).length
+                : items.length;
+
+        this.appendSectionHeader(labelRow, `${this.getTypeName(component.type)} ×${maxSelect}`, availableCount, semantic);
 
         const counter = new Text();
         counter.setText(TranslationImpl.generator(`0/${maxSelect}`));
@@ -1251,7 +2552,7 @@ export default class BetterCraftingPanel extends Component {
         counter.style.set("font-size", "0.9em");
         counter.style.set("margin-left", "8px");
         labelRow.append(counter);
-        this.sectionCounters.set(index, counter);
+        this.sectionCounters.set(getSectionCounterKey(index, semantic), counter);
         section.append(labelRow);
 
         const itemsContainer = this.createItemsContainer();
@@ -1259,9 +2560,13 @@ export default class BetterCraftingPanel extends Component {
         if (items.length === 0) {
             this.appendMissing(itemsContainer);
         } else {
-            for (const item of items) this.addItemRow(itemsContainer, index, item, maxSelect);
+            if (split && (semantic === "consumed" || semantic === "used")) {
+                for (const item of items) this.addSplitItemRow(itemsContainer, index, item, maxSelect, semantic);
+            } else {
+                for (const item of items) this.addItemRow(itemsContainer, index, item, maxSelect);
+            }
         }
-        this.updateCounter(index, maxSelect);
+        this.updateCounter(index, maxSelect, semantic);
         this.normalScrollInner.append(section);
     }
 
@@ -1468,14 +2773,167 @@ export default class BetterCraftingPanel extends Component {
                 row.style.set("background", "transparent");
                 row.style.set("border", borderBase);
             } else {
-                if (selected.length >= maxSelect) return;
+                if (selected.length >= maxSelect) {
+                    if (maxSelect !== 1 || selected.length === 0) return;
+                    selected.splice(0, selected.length, item);
+                    this.selectedItems.set(slotIndex, selected);
+                    this.rebuildNormalContent(true);
+                    return;
+                }
                 selected.push(item);
                 check.setChecked(true, false);
                 row.style.set("background", "rgba(30, 255, 128, 0.1)");
                 row.style.set("border", borderSelected);
             }
             this.selectedItems.set(slotIndex, selected);
-            this.updateCounter(slotIndex, maxSelect);
+            const component = slotIndex >= 0 ? this.recipe?.components[slotIndex] : undefined;
+            const semantic: SectionSemantic = slotIndex === -1
+                ? "base"
+                : component && component.consumedAmount <= 0
+                    ? "tool"
+                    : "consumed";
+            this.updateCounter(slotIndex, maxSelect, semantic);
+        });
+
+        parent.append(row);
+    }
+
+    private addSplitItemRow(parent: Component, slotIndex: number, item: Item, maxSelect: number, semantic: "consumed" | "used") {
+        const qualityColor = getQualityColor(item.quality);
+        const borderBase = `1px solid ${qualityColor}33`;
+        const borderHover = `1px solid ${qualityColor}77`;
+        const borderSelected = `1px solid ${qualityColor}`;
+        const splitSelection = this.getSplitSelection(slotIndex);
+        const selectedItems = semantic === "consumed" ? splitSelection.consumed : splitSelection.used;
+        const otherItems = semantic === "consumed" ? splitSelection.used : splitSelection.consumed;
+        const itemId = getItemId(item);
+        const isSelected = selectedItems.includes(item);
+        const disabled = otherItems.some(other => getItemId(other) === itemId);
+
+        const row = new Button();
+        row.style.set("display", "flex");
+        row.style.set("align-items", "center");
+        row.style.set("padding", `${ROW_PADDING_V}px 6px`);
+        row.style.set("min-height", `${ROW_MIN_HEIGHT}px`);
+        row.style.set("width", "100%");
+        row.style.set("margin", `${ROW_MARGIN}px 0`);
+        row.style.set("cursor", disabled ? "not-allowed" : "pointer");
+        row.style.set("border-radius", "2px");
+        row.style.set("box-sizing", "border-box");
+        row.style.set("overflow", "visible");
+        row.style.set("border", isSelected ? borderSelected : borderBase);
+        row.style.set("background", isSelected ? "rgba(30, 255, 128, 0.1)" : disabled ? "rgba(255, 80, 80, 0.05)" : "transparent");
+        if (disabled) row.style.set("opacity", "0.7");
+
+        let displayName: string;
+        try {
+            displayName = this.toTitleCase(item.getName(Article.None).getString());
+        } catch {
+            displayName = this.formatEnumName(ItemType[item.type] || `Item ${item.type}`);
+        }
+        const qualityName = getQualityName(item.quality);
+        if (qualityName) displayName = `${qualityName} ${displayName}`;
+
+        row.addEventListener("mouseenter", (e: MouseEvent) => {
+            this._hoveredItem = item;
+            this._hoveredDisplayName = displayName;
+            this._hoveredMouseX = e.clientX;
+            this._hoveredMouseY = e.clientY;
+
+            if (!isSelected && !disabled) {
+                row.style.set("background", "rgba(255, 255, 255, 0.05)");
+                row.style.set("border", borderHover);
+            }
+
+            if (this.shiftHeld) {
+                this.bcShowTooltip(item, displayName, e.clientX, e.clientY);
+            }
+        });
+
+        row.addEventListener("mousemove", (e: MouseEvent) => {
+            this._hoveredMouseX = e.clientX;
+            this._hoveredMouseY = e.clientY;
+            if (this.shiftHeld && this.bcTooltipEl && this.bcTooltipEl.style.display !== "none") {
+                this.bcPositionTooltip(e.clientX, e.clientY);
+            }
+        });
+
+        row.addEventListener("mouseleave", () => {
+            this._hoveredItem = null;
+            this.bcHideTooltip();
+            if (!isSelected) {
+                row.style.set("background", disabled ? "rgba(255, 80, 80, 0.05)" : "transparent");
+                row.style.set("border", borderBase);
+            }
+        });
+
+        try {
+            const handler = new ItemComponentHandler({
+                getItem: () => item,
+                getItemType: () => item.type,
+                getItemQuality: () => item.quality,
+                noDrag: true,
+            });
+            const itemComp = ItemComponent.create(handler);
+            if (itemComp) {
+                itemComp.style.set("flex-shrink", "0");
+                itemComp.style.set("margin-right", "5px");
+                row.append(itemComp);
+            }
+        } catch { /* silent */ }
+
+        const nameText = new Text();
+        nameText.setText(TranslationImpl.generator(displayName));
+        nameText.style.set("color", qualityColor);
+        nameText.style.set("flex", "1");
+        nameText.style.set("font-size", "inherit");
+        row.append(nameText);
+
+        if (disabled) {
+            const disabledText = document.createElement("span");
+            disabledText.textContent = "Excluded";
+            disabledText.style.cssText = "color:#cc7777;font-size:0.8em;margin-left:6px;white-space:nowrap;";
+            row.element.appendChild(disabledText);
+        }
+
+        const check = new CheckButton();
+        check.style.set("pointer-events", "none");
+        check.style.set("margin-left", "4px");
+        check.style.set("flex-shrink", "0");
+        check.style.set("background", "transparent");
+        check.style.set("background-color", "transparent");
+        check.style.set("border", "none");
+        check.style.set("box-shadow", "none");
+        check.style.set("padding", "0");
+        if (isSelected) check.setChecked(true, false);
+        row.append(check);
+
+        row.event.subscribe("activate", () => {
+            if (disabled) return;
+
+            const nextSelection = this.getSplitSelection(slotIndex);
+            const target = semantic === "consumed" ? [...nextSelection.consumed] : [...nextSelection.used];
+            const existingIndex = target.indexOf(item);
+            if (existingIndex >= 0) {
+                target.splice(existingIndex, 1);
+            } else {
+                if (target.length >= maxSelect) {
+                    if (maxSelect !== 1 || target.length === 0) return;
+                    target.splice(0, target.length, item);
+                } else {
+                    target.push(item);
+                }
+            }
+
+            if (semantic === "consumed") {
+                this.setSplitSelection(slotIndex, target, nextSelection.used);
+                this.updateCounter(slotIndex, maxSelect, "consumed");
+            } else {
+                this.setSplitSelection(slotIndex, nextSelection.consumed, target);
+                this.updateCounter(slotIndex, maxSelect, "used");
+            }
+
+            this.rebuildNormalContent(true);
         });
 
         parent.append(row);
@@ -1487,7 +2945,9 @@ export default class BetterCraftingPanel extends Component {
      * Rebuilds the bulk tab content. Clears exclusion state for slots that no
      * longer have items, resets the quantity to 1, and redraws all sections.
      */
-    private buildBulkContent(): void {
+    private buildBulkContent(preserveScroll = false, preserveQuantity = false): void {
+        const scrollTop = preserveScroll ? this.bulkScrollContent.element.scrollTop : 0;
+        const scrollLeft = preserveScroll ? this.bulkScrollContent.element.scrollLeft : 0;
         this._bulkContentDirty = false;
         this.bulkStaticContent.dump();
         this.bulkScrollInner.dump();
@@ -1498,6 +2958,7 @@ export default class BetterCraftingPanel extends Component {
             noRecipe.style.set("color", "#ff6666");
             this.bulkScrollInner.append(noRecipe);
             this.updateBulkCraftBtnState();
+            this.restoreScrollPosition(this.bulkScrollContent, scrollTop, scrollLeft, preserveScroll);
             return;
         }
 
@@ -1505,6 +2966,9 @@ export default class BetterCraftingPanel extends Component {
         // batches for the same recipe so the user doesn't have to re-exclude every time.
         if (this.itemType !== this._lastBulkItemType) {
             this.bulkExcludedIds.clear();
+            this.bulkPreserveDurabilityBySlot.clear();
+            this.bulkPinnedToolSelections.clear();
+            this.bulkPinnedUsedSelections.clear();
             this._lastBulkItemType = this.itemType;
         }
 
@@ -1513,17 +2977,534 @@ export default class BetterCraftingPanel extends Component {
         this.addBulkMaterialsHeader();
 
         if (this.recipe!.baseComponent !== undefined) {
-            this.addBulkComponentSection(-1, this.recipe.baseComponent, 1, false);
+            this.addBulkComponentSection(-1, this.recipe.baseComponent, 1, "tool");
         }
         for (let i = 0; i < this.recipe.components.length; i++) {
             const comp = this.recipe.components[i];
-            this.addBulkComponentSection(i, comp.type, comp.requiredAmount, comp.consumedAmount > 0);
+            if (comp.consumedAmount > 0) {
+                this.addBulkComponentSection(i, comp.type, getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount), "consumed");
+            }
+        }
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const comp = this.recipe.components[i];
+            if (this.isSplitComponent(comp)) {
+                this.addBulkComponentSection(i, comp.type, getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount), "used");
+            }
+        }
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const comp = this.recipe.components[i];
+            if (comp.consumedAmount <= 0) {
+                this.addBulkComponentSection(i, comp.type, comp.requiredAmount, "tool");
+            }
         }
 
-        this.bulkQuantity = 1;
-        if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = "1";
+        if (!preserveQuantity) {
+            this.bulkQuantity = 1;
+            if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = "1";
+        }
         this.updateBulkMaxDisplay();
         this.updateBulkCraftBtnState();
+        this.restoreScrollPosition(this.bulkScrollContent, scrollTop, scrollLeft, preserveScroll);
+    }
+
+    private buildDismantleContent(preserveScroll = false): void {
+        const scrollTop = preserveScroll ? this.bulkScrollContent.element.scrollTop : 0;
+        const scrollLeft = preserveScroll ? this.bulkScrollContent.element.scrollLeft : 0;
+        this.bulkStaticContent.dump();
+        this.bulkScrollInner.dump();
+
+        const itemType = this.dismantleSelectedItemType;
+        const dismantle = this.dismantleDescription;
+        if (!itemType || !dismantle) {
+            const noDismantle = new Text();
+            noDismantle.setText(TranslationImpl.generator("No dismantle data found for this item."));
+            noDismantle.style.set("color", "#ff6666");
+            this.bulkScrollInner.append(noDismantle);
+            this.updateBulkCraftBtnState();
+            this.restoreScrollPosition(this.bulkScrollContent, scrollTop, scrollLeft, preserveScroll);
+            return;
+        }
+
+        this.buildDismantleHeaderCard(itemType, dismantle);
+        this.addDismantleHelpBox();
+        this.addDismantleTargetSection(itemType);
+        if (dismantle.required !== undefined) {
+            this.addDismantleRequiredSection(dismantle.required);
+        }
+
+        this.bulkQuantity = Math.max(1, Math.min(this.bulkQuantity, this.computeDismantleMax() || 1));
+        if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = String(this.bulkQuantity);
+        this.updateBulkMaxDisplay();
+        this.updateBulkCraftBtnState();
+        this.restoreScrollPosition(this.bulkScrollContent, scrollTop, scrollLeft, preserveScroll);
+    }
+
+    private buildDismantleHeaderCard(itemType: ItemType, dismantle: IDismantleDescription): void {
+        const theme = SCREEN_THEME.dismantle;
+        const card = new Component();
+        card.classes.add("bc-dismantle-header-card");
+        card.style.set("flex", "1 1 100%");
+        card.style.set("width", "100%");
+        card.style.set("box-sizing", "border-box");
+        card.style.set("padding", "8px");
+        card.style.set("border", "1px solid var(--color-border, #554433)");
+        card.style.set("border-radius", "3px");
+        card.style.set("display", "flex");
+        card.style.set("flex-direction", "column");
+        card.style.set("gap", "8px");
+
+        const headerRow = document.createElement("div");
+        headerRow.style.cssText = "display:flex;align-items:center;gap:10px;flex-wrap:wrap;";
+
+        const iconHolder = document.createElement("div");
+        iconHolder.style.cssText = "flex-shrink:0;display:flex;";
+        try {
+            const handler = new ItemComponentHandler({ getItemType: () => itemType, noDrag: true });
+            const iconComp = ItemComponent.create(handler);
+            if (iconComp) iconHolder.appendChild(iconComp.element);
+        } catch (error) {
+            if (this.debugLoggingEnabled) {
+                console.error("[Better Crafting] Failed to create dismantle item icon", error);
+            }
+        }
+        headerRow.appendChild(iconHolder);
+
+        const title = document.createElement("div");
+        title.className = "bc-dismantle-header-title";
+        title.textContent = this.formatEnumName(ItemType[itemType] || `Item ${itemType}`);
+        title.style.cssText = `font-size:1.2em;font-weight:600;color:${theme.title};`;
+        headerRow.appendChild(title);
+        card.element.appendChild(headerRow);
+
+        const outputTitle = document.createElement("div");
+        outputTitle.className = "bc-dismantle-output-title";
+        outputTitle.textContent = "Produces";
+        outputTitle.style.cssText = `font-size:0.92em;font-weight:600;color:${theme.body};`;
+        card.element.appendChild(outputTitle);
+
+        const outputList = document.createElement("div");
+        outputList.className = "bc-dismantle-output-list";
+
+        for (const output of dismantle.items) {
+            const row = document.createElement("div");
+            row.className = "bc-dismantle-output-entry";
+
+            try {
+                const handler = new ItemComponentHandler({ getItemType: () => output.type, noDrag: true });
+                const iconComp = ItemComponent.create(handler);
+                if (iconComp) {
+                    iconComp.style.set("flex-shrink", "0");
+                    row.appendChild(iconComp.element);
+                }
+        } catch (error) {
+            if (this.debugLoggingEnabled) {
+                console.error("[Better Crafting] Failed to create dismantle output icon", error);
+            }
+        }
+
+            const label = document.createElement("span");
+            label.textContent = `${output.amount}x ${this.formatEnumName(ItemType[output.type] || `Item ${output.type}`)}`;
+            label.style.color = theme.accent;
+            row.appendChild(label);
+            outputList.appendChild(row);
+        }
+
+        card.element.appendChild(outputList);
+        this.bulkStaticContent.append(card);
+    }
+
+    private addDismantleHelpBox(): void {
+        this.addHelpBox("dismantle", "How This Works", [
+            ["Targets", "Matching targets start included and can be excluded."],
+            ["Required", "Required items use checked single-select selection."],
+            ["Order", "Included targets are dismantled in list order."],
+            ["Hotkey", `Current hotkey: ${this.getCurrentHotkeyText()}. ${this.getActivationModeText()}`],
+        ]);
+    }
+
+    private addDismantleRequiredSection(required: ItemTypeGroup): void {
+        const section = this.createSection();
+        const labelRow = this.createLabelRow();
+
+        const items = this.findMatchingItems(required);
+        if (!this.dismantleRequiredSelection || !items.includes(this.dismantleRequiredSelection)) {
+            this.dismantleRequiredSelection = items[0];
+        }
+
+        this.appendSectionHeader(labelRow, this.getTypeName(required), items.length, "tool");
+        this.appendDismantleDurabilityControls(labelRow);
+        section.append(labelRow);
+
+        const itemsContainer = this.createItemsContainer();
+        section.append(itemsContainer);
+        if (items.length === 0) {
+            this.appendMissing(itemsContainer);
+        } else {
+            for (const item of items) {
+                this.addDismantleRequiredRow(itemsContainer, item);
+            }
+        }
+
+        this.bulkScrollInner.append(section);
+    }
+
+    private addDismantleTargetSection(itemType: ItemType): void {
+        const section = this.createSection();
+        const labelRow = this.createLabelRow();
+        const items = this.findMatchingItems(itemType);
+
+        this.appendSectionHeader(labelRow, this.getTypeName(itemType), items.length, "consumed");
+        section.append(labelRow);
+
+        const itemsContainer = this.createItemsContainer();
+        section.append(itemsContainer);
+        if (items.length === 0) {
+            this.appendMissing(itemsContainer);
+        } else {
+            for (const item of items) {
+                this.addDismantleTargetRow(itemsContainer, item);
+            }
+        }
+
+        this.bulkScrollInner.append(section);
+    }
+
+    private addDismantleRequiredRow(parent: Component, item: Item): void {
+        const qualityColor = getQualityColor(item.quality);
+        const selected = () => this.dismantleRequiredSelection === item;
+        const borderBase = `1px solid ${qualityColor}33`;
+        const borderSelected = `1px solid ${qualityColor}`;
+
+        const row = new Button();
+        row.style.set("display", "flex");
+        row.style.set("align-items", "center");
+        row.style.set("padding", `${ROW_PADDING_V}px 6px`);
+        row.style.set("min-height", `${ROW_MIN_HEIGHT}px`);
+        row.style.set("width", "100%");
+        row.style.set("margin", `${ROW_MARGIN}px 0`);
+        row.style.set("cursor", "pointer");
+        row.style.set("border-radius", "2px");
+        row.style.set("box-sizing", "border-box");
+        row.style.set("overflow", "visible");
+        row.style.set("border", selected() ? borderSelected : borderBase);
+        row.style.set("background", selected() ? "rgba(156, 74, 53, 0.14)" : "transparent");
+
+        const qualityName = getQualityName(item.quality);
+        let displayName: string;
+        try {
+            displayName = this.toTitleCase(item.getName(Article.None).getString());
+        } catch {
+            displayName = this.formatEnumName(ItemType[item.type] || `Item ${item.type}`);
+        }
+        if (qualityName) displayName = `${qualityName} ${displayName}`;
+
+        try {
+            const handler = new ItemComponentHandler({
+                getItem:        () => item,
+                getItemType:    () => item.type,
+                getItemQuality: () => item.quality,
+                noDrag: true,
+            });
+            const itemComp = ItemComponent.create(handler);
+            if (itemComp) {
+                itemComp.style.set("flex-shrink", "0");
+                itemComp.style.set("margin-right", "5px");
+                row.append(itemComp);
+            }
+        } catch (error) {
+            if (this.debugLoggingEnabled) {
+                console.error("[Better Crafting] Failed to create dismantle required row icon", error);
+            }
+        }
+
+        const nameText = new Text();
+        nameText.setText(TranslationImpl.generator(displayName));
+        nameText.style.set("color", qualityColor);
+        nameText.style.set("flex", "1");
+        nameText.style.set("font-size", "inherit");
+        row.append(nameText);
+
+        const hint = document.createElement("span");
+        hint.style.cssText = "color:#7a6850;font-size:0.8em;margin-left:6px;white-space:nowrap;";
+        const text = selected()
+            ? this.getMaxUsesText(item, this.getDismantleDurabilityLoss(item), this.preserveDismantleRequiredDurability)
+            : "";
+        hint.textContent = text;
+        hint.style.display = text ? "inline-block" : "none";
+        row.element.appendChild(hint);
+
+        const check = new CheckButton();
+        check.style.set("pointer-events", "none");
+        check.style.set("margin-left", "4px");
+        check.style.set("flex-shrink", "0");
+        check.style.set("background", "transparent");
+        check.style.set("background-color", "transparent");
+        check.style.set("border", "none");
+        check.style.set("box-shadow", "none");
+        check.style.set("padding", "0");
+        if (selected()) check.setChecked(true, false);
+        row.append(check);
+
+        row.event.subscribe("activate", () => {
+            if (this.dismantleRequiredSelection === item) return;
+            this.dismantleRequiredSelection = item;
+            this.buildDismantleContent(true);
+        });
+
+        parent.append(row);
+    }
+
+    private appendBulkDurabilityControls(labelRow: Component, slotIndex: number): void {
+        const wrapper = document.createElement("div");
+        wrapper.style.cssText = "display:flex;align-items:center;gap:4px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end;background:transparent;padding:0;border:0;";
+
+        const label = document.createElement("span");
+        label.textContent = "Protect?";
+        label.style.cssText = "font-weight:bold;color:inherit;";
+        wrapper.appendChild(label);
+
+        const protect = new CheckButton();
+        protect.setChecked(this.bulkPreserveDurabilityBySlot.get(slotIndex) ?? true, false);
+        protect.style.set("background", "transparent");
+        protect.style.set("background-color", "transparent");
+        protect.style.set("border", "none");
+        protect.style.set("box-shadow", "none");
+        protect.style.set("padding", "0");
+        protect.style.set("margin", "0");
+        protect.event.subscribe("toggle", (_: unknown, checked: boolean) => {
+            this.bulkPreserveDurabilityBySlot.set(slotIndex, checked);
+            this.updateBulkMaxDisplay();
+            this.updateBulkCraftBtnState();
+            this.buildBulkContent(true, true);
+        });
+        wrapper.appendChild(protect.element);
+        wrapper.appendChild(this.createInfoIcon("Protect?", [
+            "Keep one durability on the selected item instead of fully using it.",
+            "The selected row shows the resulting max uses.",
+        ]));
+
+        labelRow.element.appendChild(wrapper);
+    }
+
+    private appendDismantleDurabilityControls(labelRow: Component): void {
+        const wrapper = document.createElement("div");
+        wrapper.style.cssText = "display:flex;align-items:center;gap:4px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end;background:transparent;padding:0;border:0;";
+
+        const label = document.createElement("span");
+        label.textContent = "Protect?";
+        label.style.cssText = "font-weight:bold;color:inherit;";
+        wrapper.appendChild(label);
+
+        const protect = new CheckButton();
+        protect.setChecked(this.preserveDismantleRequiredDurability, false);
+        protect.style.set("background", "transparent");
+        protect.style.set("background-color", "transparent");
+        protect.style.set("border", "none");
+        protect.style.set("box-shadow", "none");
+        protect.style.set("padding", "0");
+        protect.style.set("margin", "0");
+        protect.event.subscribe("toggle", (_: unknown, checked: boolean) => {
+            this.preserveDismantleRequiredDurability = checked;
+            this.updateBulkMaxDisplay();
+            this.updateBulkCraftBtnState();
+            this.buildDismantleContent(true);
+        });
+        wrapper.appendChild(protect.element);
+        wrapper.appendChild(this.createInfoIcon("Protect?", [
+            "Keep one durability on the selected required item instead of fully using it.",
+            "The selected row shows the resulting max uses.",
+        ]));
+
+        labelRow.element.appendChild(wrapper);
+    }
+
+    private getMaxUsesText(item: Item, perUseLoss: number, protect: boolean): string {
+        if (perUseLoss <= 0) return "";
+        const maxUses = this.getRemainingUses(item, perUseLoss, protect);
+        if (maxUses >= Number.MAX_SAFE_INTEGER) return "";
+        return `max uses ${Math.max(0, maxUses)}`;
+    }
+
+    private addDismantleTargetRow(parent: Component, item: Item): void {
+        const itemId = getItemId(item);
+        const qualityColor = getQualityColor(item.quality);
+        const locked = isItemProtected(item);
+        if (locked && itemId !== undefined) this.dismantleExcludedIds.add(itemId);
+
+        const row = this.createSelectionRow(item, qualityColor, locked);
+        const indicator = document.createElement("span");
+        indicator.style.cssText = "font-size:0.85em;margin-left:4px;color:#cc4444;flex-shrink:0;";
+        row.element.appendChild(indicator);
+
+        const sync = () => {
+            const excluded = locked || (itemId !== undefined && this.dismantleExcludedIds.has(itemId));
+            this.applySelectionRowState(row.element, !excluded, qualityColor);
+            indicator.textContent = excluded ? "✕" : "";
+            if (excluded) {
+                row.classes.add("bc-bulk-row-excluded");
+            } else {
+                row.classes.remove("bc-bulk-row-excluded");
+            }
+        };
+
+        sync();
+
+        if (!locked) {
+            row.event.subscribe("activate", () => {
+                if (itemId !== undefined && this.dismantleExcludedIds.has(itemId)) {
+                    this.dismantleExcludedIds.delete(itemId);
+                } else {
+                    if (itemId !== undefined) {
+                        this.dismantleExcludedIds.add(itemId);
+                    }
+                }
+                const max = this.computeDismantleMax();
+                if (max > 0 && this.bulkQuantity > max) {
+                    this.bulkQuantity = max;
+                    if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = String(this.bulkQuantity);
+                }
+                sync();
+                this.updateBulkMaxDisplay();
+                this.updateBulkCraftBtnState();
+            });
+        }
+
+        parent.append(row);
+    }
+
+    private createSelectionRow(item: Item, qualityColor: string, locked: boolean): Button {
+        const row = new Button();
+        row.style.set("display", "flex");
+        row.style.set("align-items", "center");
+        row.style.set("padding", `${ROW_PADDING_V}px 6px`);
+        row.style.set("min-height", `${ROW_MIN_HEIGHT}px`);
+        row.style.set("width", "100%");
+        row.style.set("margin", `${ROW_MARGIN}px 0`);
+        row.style.set("cursor", locked ? "not-allowed" : "pointer");
+        row.style.set("border-radius", "2px");
+        row.style.set("box-sizing", "border-box");
+        row.style.set("overflow", "visible");
+
+        if (locked) {
+            const badge = document.createElement("span");
+            badge.textContent = "🔒";
+            badge.style.cssText = "font-size:0.75em;margin-right:4px;opacity:0.6;";
+            row.element.appendChild(badge);
+        }
+
+        try {
+            const handler = new ItemComponentHandler({
+                getItem: () => item,
+                getItemType: () => item.type,
+                getItemQuality: () => item.quality,
+                noDrag: true,
+            });
+            const itemComp = ItemComponent.create(handler);
+            if (itemComp) {
+                itemComp.style.set("flex-shrink", "0");
+                itemComp.style.set("margin-right", "5px");
+                row.append(itemComp);
+            }
+        } catch (error) {
+            if (this.debugLoggingEnabled) {
+                console.error("[Better Crafting] Failed to create selection row icon", error);
+            }
+        }
+
+        let displayName: string;
+        try {
+            displayName = this.toTitleCase(item.getName(Article.None).getString());
+        } catch {
+            displayName = this.formatEnumName(ItemType[item.type] || `Item ${item.type}`);
+        }
+        const qualityName = getQualityName(item.quality);
+        if (qualityName) displayName = `${qualityName} ${displayName}`;
+
+        const nameText = new Text();
+        nameText.setText(TranslationImpl.generator(displayName));
+        nameText.style.set("color", qualityColor);
+        nameText.style.set("flex", "1");
+        row.append(nameText);
+
+        return row;
+    }
+
+    private applySelectionRowState(element: HTMLElement, selected: boolean, qualityColor: string): void {
+        element.style.border = selected ? `1px solid ${qualityColor}` : `1px solid ${qualityColor}33`;
+        element.style.background = selected ? "rgba(156, 74, 53, 0.14)" : "transparent";
+    }
+
+    private getCurrentHotkeyText(): string {
+        return this.activationHotkey;
+    }
+
+    private getActivationModeText(): string {
+        return this.getSettings().activationMode === "holdHotkeyToBypass"
+            ? "Hold hotkey to bypass Better Crafting UI."
+            : "Hold hotkey to access Better Crafting UI.";
+    }
+
+    private resetHelpBoxStates(): void {
+        this.helpBoxExpanded.normal = false;
+        this.helpBoxExpanded.bulk = false;
+        this.helpBoxExpanded.dismantle = false;
+    }
+
+    private addHelpBox(mode: HelpBoxId, titleText: string, rows: ReadonlyArray<readonly [label: string, content: HelpBoxRowContent]>): void {
+        const container = this.makeFullWidthWrapper();
+
+        const wrapper = document.createElement("div");
+        wrapper.className = `bc-help-box ${this.helpBoxExpanded[mode] ? "bc-help-box-expanded" : "bc-help-box-collapsed"}`;
+
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "bc-help-box-toggle";
+        toggle.setAttribute("aria-expanded", String(this.helpBoxExpanded[mode]));
+
+        const caret = document.createElement("span");
+        caret.className = "bc-help-box-caret";
+        caret.textContent = ">";
+        toggle.appendChild(caret);
+
+        const title = document.createElement("span");
+        title.className = "bc-help-box-title";
+        title.textContent = titleText;
+        toggle.appendChild(title);
+
+        const content = document.createElement("div");
+        content.className = "bc-help-box-content";
+        content.style.display = this.helpBoxExpanded[mode] ? "" : "none";
+
+        for (const [label, rowContent] of rows) {
+            content.appendChild(createHelpBoxRow(label, rowContent));
+        }
+
+        toggle.addEventListener("click", () => {
+            const expanded = !this.helpBoxExpanded[mode];
+            this.helpBoxExpanded[mode] = expanded;
+            wrapper.classList.toggle("bc-help-box-expanded", expanded);
+            wrapper.classList.toggle("bc-help-box-collapsed", !expanded);
+            toggle.setAttribute("aria-expanded", String(expanded));
+            content.style.display = expanded ? "" : "none";
+        });
+
+        wrapper.appendChild(toggle);
+        wrapper.appendChild(content);
+        container.element.appendChild(wrapper);
+        if (mode === "normal") {
+            this.normalStaticContent.append(container);
+        } else {
+            this.bulkStaticContent.append(container);
+        }
+    }
+
+    private addNormalHelpBox(): void {
+        this.addHelpBox("normal", "How This Works", [
+            ["Select", "Choose the exact materials and tools for this recipe."],
+            ["Rules", "Selection follows vanilla crafting rules."],
+            ["Quality", "Result quality depends on your crafting skill."],
+            ["Hotkey", `Current hotkey: ${this.getCurrentHotkeyText()}. ${this.getActivationModeText()}`],
+        ]);
     }
 
     /**
@@ -1531,32 +3512,11 @@ export default class BetterCraftingPanel extends Component {
      * Placed between the output card and the ingredient sections.
      */
     private addBulkHelpBox(): void {
-        const wrapper = document.createElement("div");
-        wrapper.className = "bc-bulk-help-box";
-
-        const title = document.createElement("div");
-        title.className = "bc-bulk-help-title";
-        title.textContent = "How Bulk Crafting Works";
-        wrapper.appendChild(title);
-
-        const rows: [string, string][] = [
-            ["Turns", "Each craft uses one game turn — enemies act between iterations."],
-            ["Exclude", "Click any ingredient below to <strong>exclude</strong> it. Excluded items are never consumed."],
-            ["Protected", "<strong>Protected items</strong> are excluded automatically and cannot be toggled."],
-            ["Quantity", "<strong>Shift+click ×10</strong> or <strong>Ctrl+click ×100</strong> on ± to adjust faster."],
-        ];
-
-        for (const [label, html] of rows) {
-            const row = document.createElement("div");
-            row.className = "bc-bulk-help-row";
-            row.innerHTML = `<strong>${label}:</strong> ${html}`;
-            wrapper.appendChild(row);
-        }
-
-        // Wrap in a full-width flex item so the grid doesn't collapse it.
-        const container = this.makeFullWidthWrapper();
-        container.element.appendChild(wrapper);
-        this.bulkStaticContent.append(container);
+        this.addHelpBox("bulk", "How This Works", [
+            ["Consumed", "Consumed materials start included and can be excluded."],
+            ["Tools", "Tool rows use checked inclusion selection and follow vanilla crafting rules."],
+            ["Hotkey", `Current hotkey: ${this.getCurrentHotkeyText()}. ${this.getActivationModeText()}`],
+        ]);
     }
 
     /**
@@ -1566,7 +3526,7 @@ export default class BetterCraftingPanel extends Component {
     private addBulkMaterialsHeader(): void {
         const el = document.createElement("div");
         el.className = "bc-bulk-materials-header";
-        el.textContent = "Materials — Click to Exclude";
+        el.textContent = "Materials - Click to Exclude";
 
         const container = this.makeFullWidthWrapper();
         container.element.appendChild(el);
@@ -1577,22 +3537,33 @@ export default class BetterCraftingPanel extends Component {
         slotIndex: number,
         type: ItemType | ItemTypeGroup,
         requiredAmount: number,
-        consumed: boolean,
+        semantic: "consumed" | "used" | "tool",
     ): void {
         const section = this.createSection();
         // Blue theme CSS selector targets this class on bulk sections.
         section.classes.add("bc-bulk-section");
 
         const labelRow = this.createLabelRow();
-        const label = new Text();
-        label.classes.add("better-crafting-heading");
         const prefix = slotIndex === -1 ? "Base: " : "";
         const items = this.findMatchingItems(type);
-        label.setText(TranslationImpl.generator(
-            `${prefix}${this.getTypeName(type)} \u00d7${requiredAmount}${consumed ? " (consumed)" : " (tool)"} (${items.length} available)`
-        ));
-        label.style.set("font-weight", "bold");
-        labelRow.append(label);
+        const availableCount = items.filter(item => {
+            const itemId = getItemId(item);
+            const excludedIds = this.bulkExcludedIds.get(slotIndex) ?? new Set<number>();
+            const usedIds = new Set((this.bulkPinnedUsedSelections.get(slotIndex) ?? []).map(selected => getItemId(selected)).filter((id): id is number => id !== undefined));
+            if (semantic === "used") {
+                return itemId === undefined || !excludedIds.has(itemId);
+            }
+
+            if (semantic === "consumed") {
+                return itemId === undefined || (!excludedIds.has(itemId) && !usedIds.has(itemId));
+            }
+
+            return true;
+        }).length;
+        this.appendSectionHeader(labelRow, `${prefix}${this.getTypeName(type)} ×${requiredAmount}`, availableCount, slotIndex === -1 ? "base" : semantic);
+        if ((semantic === "tool" || semantic === "used") && slotIndex >= 0) {
+            this.appendBulkDurabilityControls(labelRow, slotIndex);
+        }
         section.append(labelRow);
 
         const itemsContainer = this.createItemsContainer();
@@ -1603,27 +3574,76 @@ export default class BetterCraftingPanel extends Component {
             if (!this.bulkExcludedIds.has(slotIndex)) {
                 this.bulkExcludedIds.set(slotIndex, new Set<number>());
             }
+            if (semantic === "tool" && slotIndex >= 0) {
+                this.bulkPinnedToolSelections.set(slotIndex, this.getBulkToolSelection(slotIndex, items, requiredAmount));
+            }
+            if (semantic === "used" && slotIndex >= 0) {
+                this.bulkPinnedUsedSelections.set(slotIndex, this.getBulkUsedSelection(slotIndex, items, requiredAmount));
+            }
             for (const item of items) {
-                this.addBulkItemRow(itemsContainer, slotIndex, item);
+                if (semantic === "consumed" || slotIndex < 0) {
+                    this.addBulkItemRow(itemsContainer, slotIndex, item);
+                } else if (semantic === "used") {
+                    this.addBulkUsedRow(itemsContainer, slotIndex, item, requiredAmount);
+                } else {
+                    this.addBulkToolRow(itemsContainer, slotIndex, item, requiredAmount);
+                }
             }
         }
 
         this.bulkScrollInner.append(section);
     }
 
+    private getBulkToolSelection(slotIndex: number, items: Item[], maxSelect: number): Item[] {
+        const selected = this.bulkPinnedToolSelections.get(slotIndex) ?? [];
+        const selectedIds = new Set(selected.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+        const preserved = items.filter(item => {
+            const itemId = getItemId(item);
+            return itemId !== undefined && selectedIds.has(itemId);
+        }).slice(0, maxSelect);
+        if (preserved.length >= maxSelect) return preserved;
+
+        const extras = items.filter(item => {
+            const itemId = getItemId(item);
+            return itemId === undefined || !selectedIds.has(itemId);
+        });
+        return [...preserved, ...extras].slice(0, maxSelect);
+    }
+
+    private getBulkUsedSelection(slotIndex: number, items: Item[], maxSelect: number): Item[] {
+        const selected = this.bulkPinnedUsedSelections.get(slotIndex) ?? [];
+        const selectedIds = new Set(selected.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+        const excluded = this.bulkExcludedIds.get(slotIndex) ?? new Set<number>();
+        const preserved = items.filter(item => {
+            const itemId = getItemId(item);
+            return itemId !== undefined && selectedIds.has(itemId) && !excluded.has(itemId);
+        }).slice(0, maxSelect);
+        if (preserved.length >= maxSelect) return preserved;
+
+        const extras = items.filter(item => {
+            const itemId = getItemId(item);
+            return itemId !== undefined && !selectedIds.has(itemId) && !excluded.has(itemId);
+        });
+        return [...preserved, ...extras].slice(0, maxSelect);
+    }
+
     private addBulkItemRow(parent: Component, slotIndex: number, item: Item): void {
         const qualityColor = getQualityColor(item.quality);
         const itemId = getItemId(item);
+        const usedSelectionIds = new Set((this.bulkPinnedUsedSelections.get(slotIndex) ?? []).map(selected => getItemId(selected)).filter((id): id is number => id !== undefined));
 
         // Protected items are excluded by default and cannot be un-excluded.
         const autoExcluded = isItemProtected(item);
         if (autoExcluded) {
             const excludedSet = this.bulkExcludedIds.get(slotIndex) ?? new Set<number>();
-            excludedSet.add(itemId);
+            if (itemId !== undefined) {
+                excludedSet.add(itemId);
+            }
             this.bulkExcludedIds.set(slotIndex, excludedSet);
         }
 
-        const isExcluded = () => this.bulkExcludedIds.get(slotIndex)?.has(itemId) ?? false;
+        const isUsedSelection = () => itemId !== undefined && usedSelectionIds.has(itemId);
+        const isExcluded = () => itemId !== undefined && ((this.bulkExcludedIds.get(slotIndex)?.has(itemId) ?? false) || isUsedSelection());
 
         const row = new Button();
         row.style.set("display", "flex");
@@ -1632,14 +3652,14 @@ export default class BetterCraftingPanel extends Component {
         row.style.set("min-height", `${ROW_MIN_HEIGHT}px`);
         row.style.set("width", "100%");
         row.style.set("margin", `${ROW_MARGIN}px 0`);
-        row.style.set("cursor", autoExcluded ? "not-allowed" : "pointer");
+        row.style.set("cursor", autoExcluded || isUsedSelection() ? "not-allowed" : "pointer");
         row.style.set("border-radius", "2px");
         row.style.set("box-sizing", "border-box");
         row.style.set("overflow", "visible");
         row.style.set("border", `1px solid ${qualityColor}33`);
         row.style.set("background", "transparent");
 
-        if (autoExcluded) {
+        if (autoExcluded || isUsedSelection()) {
             row.classes.add("bc-bulk-row-excluded");
         }
 
@@ -1683,10 +3703,10 @@ export default class BetterCraftingPanel extends Component {
 
         const exclIndicator = document.createElement("span");
         exclIndicator.style.cssText = "font-size:0.85em;margin-left:4px;color:#cc4444;flex-shrink:0;";
-        exclIndicator.textContent = isExcluded() ? "✗" : "";
+        exclIndicator.textContent = isUsedSelection() ? "Used" : isExcluded() ? "✗" : "";
         row.element.appendChild(exclIndicator);
 
-        if (!autoExcluded) {
+        if (!autoExcluded && !isUsedSelection()) {
             row.element.addEventListener("mouseenter", () => {
                 if (!isExcluded()) {
                     row.style.set("background", "rgba(255, 255, 255, 0.05)");
@@ -1702,14 +3722,16 @@ export default class BetterCraftingPanel extends Component {
 
             row.event.subscribe("activate", () => {
                 const excludedSet = this.bulkExcludedIds.get(slotIndex) ?? new Set<number>();
-                if (excludedSet.has(itemId)) {
+                if (itemId !== undefined && excludedSet.has(itemId)) {
                     excludedSet.delete(itemId);
                     row.classes.remove("bc-bulk-row-excluded");
                     exclIndicator.textContent = "";
                     row.style.set("background", "transparent");
                     row.style.set("border", `1px solid ${qualityColor}33`);
                 } else {
-                    excludedSet.add(itemId);
+                    if (itemId !== undefined) {
+                        excludedSet.add(itemId);
+                    }
                     row.classes.add("bc-bulk-row-excluded");
                     exclIndicator.textContent = "✗";
                     row.style.set("background", "transparent");
@@ -1724,16 +3746,364 @@ export default class BetterCraftingPanel extends Component {
         parent.append(row);
     }
 
+    private addBulkUsedRow(parent: Component, slotIndex: number, item: Item, maxSelect: number): void {
+        const qualityColor = getQualityColor(item.quality);
+        const itemId = getItemId(item);
+        const excludedIds = this.bulkExcludedIds.get(slotIndex) ?? new Set<number>();
+        const isSelected = () => (this.bulkPinnedUsedSelections.get(slotIndex) ?? []).some(entry => getItemId(entry) === itemId);
+        const isDisabled = () => itemId !== undefined && excludedIds.has(itemId);
+        const preSelected = isSelected();
+
+        const borderBase = `1px solid ${qualityColor}33`;
+        const borderHover = `1px solid ${qualityColor}77`;
+        const borderSelected = `1px solid ${qualityColor}`;
+
+        const row = new Button();
+        row.style.set("display", "flex");
+        row.style.set("align-items", "center");
+        row.style.set("padding", `${ROW_PADDING_V}px 6px`);
+        row.style.set("min-height", `${ROW_MIN_HEIGHT}px`);
+        row.style.set("width", "100%");
+        row.style.set("margin", `${ROW_MARGIN}px 0`);
+        row.style.set("cursor", isDisabled() ? "not-allowed" : "pointer");
+        row.style.set("border-radius", "2px");
+        row.style.set("box-sizing", "border-box");
+        row.style.set("overflow", "visible");
+        row.style.set("border", preSelected ? borderSelected : borderBase);
+        row.style.set("background", preSelected ? "rgba(30, 255, 128, 0.1)" : isDisabled() ? "rgba(255, 80, 80, 0.05)" : "transparent");
+        if (isDisabled()) row.style.set("opacity", "0.7");
+
+        const qualityName = getQualityName(item.quality);
+        let displayName: string;
+        try {
+            displayName = this.toTitleCase(item.getName(Article.None).getString());
+        } catch {
+            displayName = this.formatEnumName(ItemType[item.type] || `Item ${item.type}`);
+        }
+        if (qualityName) displayName = `${qualityName} ${displayName}`;
+
+        row.addEventListener("mouseenter", (e: MouseEvent) => {
+            this._hoveredItem = item;
+            this._hoveredDisplayName = displayName;
+            this._hoveredMouseX = e.clientX;
+            this._hoveredMouseY = e.clientY;
+
+            if (!isSelected() && !isDisabled()) {
+                row.style.set("background", "rgba(255, 255, 255, 0.05)");
+                row.style.set("border", borderHover);
+            }
+
+            if (this.shiftHeld) {
+                this.bcShowTooltip(item, displayName, e.clientX, e.clientY);
+            }
+        });
+
+        row.addEventListener("mousemove", (e: MouseEvent) => {
+            this._hoveredMouseX = e.clientX;
+            this._hoveredMouseY = e.clientY;
+            if (this.shiftHeld && this.bcTooltipEl && this.bcTooltipEl.style.display !== "none") {
+                this.bcPositionTooltip(e.clientX, e.clientY);
+            }
+        });
+
+        row.addEventListener("mouseleave", () => {
+            this._hoveredItem = null;
+            this.bcHideTooltip();
+            if (!isSelected()) {
+                row.style.set("background", isDisabled() ? "rgba(255, 80, 80, 0.05)" : "transparent");
+                row.style.set("border", borderBase);
+            }
+        });
+
+        try {
+            const handler = new ItemComponentHandler({
+                getItem: () => item,
+                getItemType: () => item.type,
+                getItemQuality: () => item.quality,
+                noDrag: true,
+            });
+            const itemComp = ItemComponent.create(handler);
+            if (itemComp) {
+                itemComp.style.set("flex-shrink", "0");
+                itemComp.style.set("margin-right", "5px");
+                row.append(itemComp);
+            }
+        } catch { /* silent */ }
+
+        const nameText = new Text();
+        nameText.setText(TranslationImpl.generator(displayName));
+        nameText.style.set("color", qualityColor);
+        nameText.style.set("flex", "1");
+        nameText.style.set("font-size", "inherit");
+        row.append(nameText);
+
+        if (isDisabled()) {
+            const disabledText = document.createElement("span");
+            disabledText.textContent = "Excluded";
+            disabledText.style.cssText = "color:#cc7777;font-size:0.8em;margin-left:6px;white-space:nowrap;";
+            row.element.appendChild(disabledText);
+        }
+
+        const check = new CheckButton();
+        check.style.set("pointer-events", "none");
+        check.style.set("margin-left", "4px");
+        check.style.set("flex-shrink", "0");
+        check.style.set("background", "transparent");
+        check.style.set("background-color", "transparent");
+        check.style.set("border", "none");
+        check.style.set("box-shadow", "none");
+        check.style.set("padding", "0");
+        if (preSelected) check.setChecked(true, false);
+        row.append(check);
+
+        row.event.subscribe("activate", () => {
+            if (isDisabled()) return;
+
+            const selected = this.bulkPinnedUsedSelections.get(slotIndex) ?? [];
+            const idx = selected.findIndex(entry => getItemId(entry) === itemId);
+            if (idx >= 0) {
+                selected.splice(idx, 1);
+            } else {
+                if (selected.length >= maxSelect) {
+                    if (maxSelect !== 1 || selected.length === 0) return;
+                    selected.splice(0, selected.length, item);
+                } else {
+                    selected.push(item);
+                }
+            }
+
+            this.bulkPinnedUsedSelections.set(slotIndex, [...selected]);
+            this.buildBulkContent(true, true);
+        });
+
+        parent.append(row);
+    }
+
+    private addBulkToolRow(parent: Component, slotIndex: number, item: Item, maxSelect: number): void {
+        const qualityColor = getQualityColor(item.quality);
+        const itemId = getItemId(item);
+        const isSelected = () => (this.bulkPinnedToolSelections.get(slotIndex) ?? []).some(entry => getItemId(entry) === itemId);
+        const preSelected = isSelected();
+
+        const borderBase = `1px solid ${qualityColor}33`;
+        const borderHover = `1px solid ${qualityColor}77`;
+        const borderSelected = `1px solid ${qualityColor}`;
+
+        const row = new Button();
+        row.style.set("display", "flex");
+        row.style.set("align-items", "center");
+        row.style.set("padding", `${ROW_PADDING_V}px 6px`);
+        row.style.set("min-height", `${ROW_MIN_HEIGHT}px`);
+        row.style.set("width", "100%");
+        row.style.set("margin", `${ROW_MARGIN}px 0`);
+        row.style.set("cursor", "pointer");
+        row.style.set("border-radius", "2px");
+        row.style.set("box-sizing", "border-box");
+        row.style.set("overflow", "visible");
+        row.style.set("border", preSelected ? borderSelected : borderBase);
+        row.style.set("background", preSelected ? "rgba(30, 255, 128, 0.1)" : "transparent");
+
+        const qualityName = getQualityName(item.quality);
+        let displayName: string;
+        try {
+            displayName = this.toTitleCase(item.getName(Article.None).getString());
+        } catch {
+            displayName = this.formatEnumName(ItemType[item.type] || `Item ${item.type}`);
+        }
+        if (qualityName) displayName = `${qualityName} ${displayName}`;
+
+        row.addEventListener("mouseenter", (e: MouseEvent) => {
+            this._hoveredItem = item;
+            this._hoveredDisplayName = displayName;
+            this._hoveredMouseX = e.clientX;
+            this._hoveredMouseY = e.clientY;
+
+            if (!isSelected()) {
+                row.style.set("background", "rgba(255, 255, 255, 0.05)");
+                row.style.set("border", borderHover);
+            }
+
+            if (this.shiftHeld) {
+                this.bcShowTooltip(item, displayName, e.clientX, e.clientY);
+            }
+        });
+
+        row.addEventListener("mousemove", (e: MouseEvent) => {
+            this._hoveredMouseX = e.clientX;
+            this._hoveredMouseY = e.clientY;
+            if (this.shiftHeld && this.bcTooltipEl && this.bcTooltipEl.style.display !== "none") {
+                this.bcPositionTooltip(e.clientX, e.clientY);
+            }
+        });
+
+        row.addEventListener("mouseleave", () => {
+            this._hoveredItem = null;
+            this.bcHideTooltip();
+
+            if (!isSelected()) {
+                row.style.set("background", "transparent");
+                row.style.set("border", borderBase);
+            }
+        });
+
+        try {
+            const handler = new ItemComponentHandler({
+                getItem:        () => item,
+                getItemType:    () => item.type,
+                getItemQuality: () => item.quality,
+                noDrag: true,
+            });
+            const itemComp = ItemComponent.create(handler);
+            if (itemComp) {
+                itemComp.style.set("flex-shrink", "0");
+                itemComp.style.set("margin-right", "5px");
+                row.append(itemComp);
+            }
+        } catch { /* silent */ }
+
+        const nameText = new Text();
+        nameText.setText(TranslationImpl.generator(displayName));
+        nameText.style.set("color", qualityColor);
+        nameText.style.set("flex", "1");
+        nameText.style.set("font-size", "inherit");
+        row.append(nameText);
+
+        const hint = document.createElement("span");
+        hint.style.cssText = "color:#7a6850;font-size:0.8em;margin-left:6px;white-space:nowrap;display:none;";
+        const updateHint = () => {
+            const text = isSelected()
+                ? this.getMaxUsesText(item, this.getCraftDurabilityLoss(item), this.bulkPreserveDurabilityBySlot.get(slotIndex) ?? true)
+                : "";
+            hint.textContent = text;
+            hint.style.display = text ? "inline-block" : "none";
+        };
+        updateHint();
+        row.element.appendChild(hint);
+
+        const check = new CheckButton();
+        check.style.set("pointer-events", "none");
+        check.style.set("margin-left", "4px");
+        check.style.set("flex-shrink", "0");
+        check.style.set("background", "transparent");
+        check.style.set("background-color", "transparent");
+        check.style.set("border", "none");
+        check.style.set("box-shadow", "none");
+        check.style.set("padding", "0");
+        if (preSelected) check.setChecked(true, false);
+        row.append(check);
+
+        row.event.subscribe("activate", () => {
+            const selected = this.bulkPinnedToolSelections.get(slotIndex) ?? [];
+            const idx = selected.findIndex(entry => getItemId(entry) === itemId);
+            let needsRebuild = false;
+            if (idx >= 0) {
+                selected.splice(idx, 1);
+                check.setChecked(false, false);
+                row.style.set("background", "transparent");
+                row.style.set("border", borderBase);
+            } else {
+                if (selected.length >= maxSelect) {
+                    if (maxSelect !== 1 || selected.length === 0) return;
+                    selected.splice(0, selected.length, item);
+                    needsRebuild = true;
+                } else {
+                selected.push(item);
+                check.setChecked(true, false);
+                row.style.set("background", "rgba(30, 255, 128, 0.1)");
+                row.style.set("border", borderSelected);
+                }
+            }
+            this.bulkPinnedToolSelections.set(slotIndex, selected);
+            if (needsRebuild) {
+                this.buildBulkContent(true, true);
+            } else {
+                updateHint();
+                this.updateBulkMaxDisplay();
+                this.updateBulkCraftBtnState();
+            }
+        });
+
+        parent.append(row);
+    }
+
     // ── Bulk quantity helpers ─────────────────────────────────────────────────
 
-    /** Returns the stamina-based and material-based craft limits independently. */
-    private computeBulkLimits(): { staminaMax: number; materialMax: number } {
-        if (!this.recipe || !localPlayer?.island) return { staminaMax: 0, materialMax: 0 };
+    private getCraftDurabilityLoss(item: Item): number {
+        return Math.max(0, item.getDamageModifier?.() ?? 0);
+    }
+
+    private getDismantleDurabilityLoss(item: Item): number {
+        return Math.max(0, (item.description as any)?.damageOnUse?.[ActionType.Dismantle] ?? item.getDamageModifier?.() ?? 0);
+    }
+
+    private getRemainingUses(item: Item, perUseLoss: number, leaveOneUse: boolean): number {
+        if (perUseLoss <= 0) return Number.MAX_SAFE_INTEGER;
+        const durability = item.durability ?? 0;
+        return Math.max(0, Math.floor((durability - (leaveOneUse ? perUseLoss : 0)) / perUseLoss));
+    }
+
+    private computeBulkDurabilityMax(excludedIds: Set<number>): number {
+        if (!this.recipe) return Number.MAX_SAFE_INTEGER;
+
+        const selection = this.resolveBulkCraftSelection(this.itemType as ItemType, excludedIds);
+        if (!selection) return 0;
+
+        let durabilityMax = Number.MAX_SAFE_INTEGER;
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const comp = this.recipe.components[i];
+            const items = selection.slotSelections.get(i) ?? [];
+            const preserveDurability = this.bulkPreserveDurabilityBySlot.get(i) ?? true;
+            const durabilityItems = this.isSplitComponent(comp)
+                ? items.slice(getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount))
+                : comp.consumedAmount <= 0
+                    ? items
+                    : [];
+            for (const item of durabilityItems) {
+                durabilityMax = Math.min(
+                    durabilityMax,
+                    this.getRemainingUses(item, this.getCraftDurabilityLoss(item), preserveDurability),
+                );
+            }
+        }
+
+        return durabilityMax;
+    }
+
+    private prepareBulkPinnedSelections(excludedIds: Set<number>): boolean {
+        if (!this.recipe) return false;
+
+        const selection = this.resolveBulkCraftSelection(this.itemType as ItemType, excludedIds);
+        if (!selection) return false;
+
+        this.bulkPinnedToolSelections.clear();
+        this.bulkPinnedUsedSelections.clear();
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const comp = this.recipe.components[i];
+            const items = selection.slotSelections.get(i) ?? [];
+            if (this.isSplitComponent(comp)) {
+                const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);
+                const usedItems = items.slice(getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount));
+                if (usedItems.length < usedCount) return false;
+                this.bulkPinnedUsedSelections.set(i, [...usedItems]);
+                continue;
+            }
+
+            if (comp.consumedAmount > 0 || !(this.bulkPreserveDurabilityBySlot.get(i) ?? true)) continue;
+            if (items.length < comp.requiredAmount) return false;
+            this.bulkPinnedToolSelections.set(i, [...items]);
+        }
+
+        return true;
+    }
+
+    /** Returns the stamina-based, material-based, and durability-based craft limits independently. */
+    private computeBulkLimits(): { staminaMax: number; materialMax: number; durabilityMax: number } {
+        if (!this.recipe || !localPlayer?.island) return { staminaMax: 0, materialMax: 0, durabilityMax: 0 };
 
         const staminaCost = STAMINA_COST_PER_LEVEL[this.recipe.level as RecipeLevel] ?? 4;
         const currentStamina: number =
             (localPlayer as any).stat?.get?.(Stat.Stamina)?.value ?? 0;
-        const staminaMax = this.getSettings().unsafeBulkCrafting
+        const staminaMax = this.unsafeCraftingEnabled
             ? Number.MAX_SAFE_INTEGER
             : staminaCost > 0 ? Math.floor(currentStamina / staminaCost) : 9999;
 
@@ -1752,13 +4122,17 @@ export default class BetterCraftingPanel extends Component {
             materialMax++;
         }
 
-        return { staminaMax, materialMax };
+        const durabilityMax = this.computeBulkDurabilityMax(excludedIds);
+        return { staminaMax, materialMax, durabilityMax };
 
         // Base component (slot -1) — always consumed
         if (this.recipe!.baseComponent !== undefined) {
             const excluded = this.bulkExcludedIds.get(-1) ?? new Set<number>();
             const available = this.findMatchingItems(this.recipe!.baseComponent!)
-                .filter(item => !excluded.has(getItemId(item)));
+                .filter(item => {
+                    const itemId = getItemId(item);
+                    return itemId === undefined || !excluded.has(itemId);
+                });
             materialMax = Math.min(materialMax, available.length);
         }
 
@@ -1767,13 +4141,16 @@ export default class BetterCraftingPanel extends Component {
             if (comp.consumedAmount <= 0) continue; // tool — not consumed
             const excluded = this.bulkExcludedIds.get(i) ?? new Set<number>();
             const available = this.findMatchingItems(comp.type)
-                .filter(item => !excluded.has(getItemId(item)));
+                .filter(item => {
+                    const itemId = getItemId(item);
+                    return itemId === undefined || !excluded.has(itemId);
+                });
             const perCraft = comp.requiredAmount;
             if (perCraft <= 0) continue;
             materialMax = Math.min(materialMax, Math.floor(available.length / perCraft));
         }
 
-        return { staminaMax, materialMax };
+        return { staminaMax, materialMax, durabilityMax };
     }
 
     /**
@@ -1781,20 +4158,80 @@ export default class BetterCraftingPanel extends Component {
      * the player's current stamina. Returns 0 if not craftable at all.
      */
     private computeBulkMax(): number {
-        const { staminaMax, materialMax } = this.computeBulkLimits();
-        return Math.max(0, Math.min(staminaMax, materialMax));
+        if (this.panelMode === "dismantle") {
+            return this.computeDismantleMax();
+        }
+        const { staminaMax, materialMax, durabilityMax } = this.computeBulkLimits();
+        return Math.max(0, Math.min(staminaMax, materialMax, durabilityMax));
+    }
+
+    private computeDismantleMax(): number {
+        if (!this.dismantleSelectedItemType || !this.dismantleDescription) return 0;
+        if (this.dismantleDescription.required !== undefined && !this.dismantleRequiredSelection) return 0;
+        const targetMax = this.getIncludedDismantleItems().length;
+        if (!this.dismantleRequiredSelection) return targetMax;
+        const durabilityMax = this.getRemainingUses(
+            this.dismantleRequiredSelection,
+            this.getDismantleDurabilityLoss(this.dismantleRequiredSelection),
+            this.preserveDismantleRequiredDurability,
+        );
+        return Math.max(0, Math.min(targetMax, durabilityMax));
+    }
+
+    private hasDismantleDurabilityLimit(): boolean {
+        if (!this.dismantleRequiredSelection) return false;
+        const perUseLoss = this.getDismantleDurabilityLoss(this.dismantleRequiredSelection);
+        return this.getRemainingUses(
+            this.dismantleRequiredSelection,
+            perUseLoss,
+            this.preserveDismantleRequiredDurability,
+        ) === 0;
+    }
+
+    private getIncludedDismantleItems(): Item[] {
+        if (!this.dismantleSelectedItemType) return [];
+        return this.findMatchingItems(this.dismantleSelectedItemType).filter(item => {
+            const itemId = getItemId(item);
+            return !isItemProtected(item) && (itemId === undefined || !this.dismantleExcludedIds.has(itemId));
+        });
     }
 
     private updateBulkMaxDisplay(): void {
-        const { staminaMax, materialMax } = this.computeBulkLimits();
-        const max = Math.max(0, Math.min(staminaMax, materialMax));
+        if (this.panelMode === "dismantle") {
+            const max = this.computeDismantleMax();
+            if (this.bulkMaxLabel) {
+                if (max > 0) {
+                    this.bulkMaxLabel.textContent = `(max ${max})`;
+                    this.bulkMaxLabel.style.color = "#9f7768";
+                } else {
+                    this.bulkMaxLabel.textContent = this.dismantleDescription?.required !== undefined && !this.dismantleRequiredSelection
+                        ? "(select required item)"
+                        : this.hasDismantleDurabilityLimit()
+                            ? "(required tool durability limit)"
+                        : "(no eligible items)";
+                    this.bulkMaxLabel.style.color = "#cc4444";
+                }
+            }
+            if (max > 0 && this.bulkQuantity > max) {
+                this.bulkQuantity = max;
+                if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = String(this.bulkQuantity);
+            }
+            return;
+        }
+
+        const { staminaMax, materialMax, durabilityMax } = this.computeBulkLimits();
+        const max = Math.max(0, Math.min(staminaMax, materialMax, durabilityMax));
         if (this.bulkMaxLabel) {
             if (max > 0) {
                 this.bulkMaxLabel.textContent = `(max ${max})`;
                 this.bulkMaxLabel.style.color = "#7a6850";
             } else {
-                this.bulkMaxLabel.textContent = (!this.getSettings().unsafeBulkCrafting && staminaMax === 0 && materialMax > 0)
+                this.bulkMaxLabel.textContent = (!this.unsafeCraftingEnabled && staminaMax === 0 && materialMax > 0)
                     ? "(insufficient stamina)"
+                    : (this.hasIncompleteBulkToolSelection() && materialMax > 0)
+                        ? "(select tools)"
+                    : (durabilityMax === 0 && materialMax > 0)
+                        ? "(tool durability limit)"
                     : "(not enough materials)";
                 this.bulkMaxLabel.style.color = "#cc4444";
             }
@@ -1834,12 +4271,54 @@ export default class BetterCraftingPanel extends Component {
 
     private bulkCrafting = false;
 
+    private hasIncompleteBulkToolSelection(): boolean {
+        if (!this.recipe) return false;
+
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const comp = this.recipe.components[i];
+            const expectedCount = this.isSplitComponent(comp)
+                ? getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount)
+                : comp.consumedAmount <= 0
+                    ? comp.requiredAmount
+                    : 0;
+            if (expectedCount === 0) continue;
+
+            const selected = this.isSplitComponent(comp)
+                ? (this.bulkPinnedUsedSelections.get(i) ?? [])
+                : (this.bulkPinnedToolSelections.get(i) ?? []);
+            if (selected.length < expectedCount) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private async onBulkCraft(): Promise<void> {
+        if (this.panelMode === "dismantle") {
+            if (this.bulkCrafting || !this.dismantleSelectedItemType || !this.dismantleDescription) return;
+            const max = this.computeDismantleMax();
+            if (max <= 0 || this.bulkQuantity < 1) return;
+
+            const targets = this.getIncludedDismantleItems().slice(0, this.bulkQuantity);
+            if (targets.length === 0) return;
+
+            this.bulkCrafting = true;
+            try {
+                await this.onDismantleCallback(targets, this.dismantleRequiredSelection);
+                this.scheduleInventoryRefresh();
+            } finally {
+                this.bulkCrafting = false;
+            }
+            return;
+        }
+
         if (this.bulkCrafting || !this.itemType || !this.recipe) return;
         const max = this.computeBulkMax();
         if (max <= 0 || this.bulkQuantity < 1) return;
 
         const flatExcluded = this.getBulkExcludedIds();
+        if (!this.prepareBulkPinnedSelections(flatExcluded)) return;
 
         this.bulkCrafting = true;
         try {
@@ -1848,9 +4327,7 @@ export default class BetterCraftingPanel extends Component {
                 this.bulkQuantity,
                 flatExcluded,
             );
-            // Rebuild bulk content after crafting — materials have been consumed.
             this._bulkContentDirty = true;
-            this.buildBulkContent();
         } finally {
             this.bulkCrafting = false;
         }
@@ -1869,7 +4346,8 @@ export default class BetterCraftingPanel extends Component {
         itemType: ItemType,
         excludedIds: Set<number>,
         sessionConsumedIds?: ReadonlySet<number>,
-    ): { tools: Item[]; consumed: Item[]; base: Item | undefined } | null {
+    ): { required: Item[]; consumed: Item[]; base: Item | undefined } | null {
+        this.lastBulkResolutionMessage = undefined;
         // Merge user-excluded IDs with items already consumed this bulk session
         // to prevent re-picking items the game engine hasn't physically removed yet.
         const effectiveExcluded = sessionConsumedIds?.size
@@ -1879,7 +4357,7 @@ export default class BetterCraftingPanel extends Component {
         if (!selection) return null;
 
         return {
-            tools: selection.tools,
+            required: selection.required,
             consumed: selection.consumed,
             base: selection.base,
         };
@@ -1901,17 +4379,18 @@ export default class BetterCraftingPanel extends Component {
         excludedIds: ReadonlySet<number>,
         permanentlyConsumedIds: ReadonlySet<number> = new Set<number>(),
     ): IBulkCraftSelection | null {
+        this.lastBulkResolutionMessage = undefined;
         const recipe = itemDescriptions[itemType]?.recipe;
         if (!recipe) return null;
 
-        const tools: Item[] = [];
-        const consumed: Item[] = [];
         const reservedIds = new Set<number>(permanentlyConsumedIds);
         const newlyConsumedIds = new Set<number>();
+        const slotSelections = new Map<number, Item[]>();
         let base: Item | undefined;
 
         const reserveItem = (item: Item, permanentlyConsumed: boolean): boolean => {
             const itemId = getItemId(item);
+            if (itemId === undefined) return false;
             if (reservedIds.has(itemId)) return false;
 
             reservedIds.add(itemId);
@@ -1927,28 +4406,218 @@ export default class BetterCraftingPanel extends Component {
             if (!reserveItem(base, true)) return null;
         }
 
-        for (const comp of recipe.components) {
+        for (let i = 0; i < recipe.components.length; i++) {
+            const comp = recipe.components[i];
+            if (this.isSplitComponent(comp)) {
+                const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);
+                const consumedCount = getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount);
+                const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds);
+                const pinnedUsed = this.bulkPinnedUsedSelections.get(i) ?? [];
+                const pinnedUsedIds = pinnedUsed.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
+                const candidateMap = new Map<number, Item>();
+                for (const candidate of candidates) {
+                    const candidateId = getItemId(candidate);
+                    if (candidateId !== undefined && !candidateMap.has(candidateId)) {
+                        candidateMap.set(candidateId, candidate);
+                    }
+                }
+
+                const resolvedUsed: Item[] = [];
+                for (const itemId of pinnedUsedIds) {
+                    const candidate = candidateMap.get(itemId);
+                    if (!candidate || reservedIds.has(itemId)) {
+                        this.setBulkResolutionFailure({
+                            reason: "pinnedToolUnavailable",
+                            slotIndex: i,
+                            itemTypeOrGroup: comp.type as number,
+                            requestedItemIds: pinnedUsedIds,
+                            candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                        });
+                        return null;
+                    }
+
+                    reservedIds.add(itemId);
+                    resolvedUsed.push(candidate);
+                    if (resolvedUsed.length >= usedCount) break;
+                }
+
+                if (resolvedUsed.length < usedCount) {
+                    this.setBulkResolutionFailure({
+                        reason: "pinnedToolUnavailable",
+                        slotIndex: i,
+                        itemTypeOrGroup: comp.type as number,
+                        requestedItemIds: pinnedUsedIds,
+                        candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                    });
+                    return null;
+                }
+
+                const consumedCandidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds);
+                if (consumedCandidates.length < consumedCount) return null;
+                const pickedConsumed = consumedCandidates.slice(0, consumedCount);
+                for (const item of pickedConsumed) {
+                    if (!reserveItem(item, true)) return null;
+                }
+
+                slotSelections.set(i, [...pickedConsumed, ...resolvedUsed]);
+                continue;
+            }
+
+            if (comp.consumedAmount <= 0) continue;
             const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds);
             if (candidates.length < comp.requiredAmount) return null;
 
             const picked = candidates.slice(0, comp.requiredAmount);
-            // Only the first consumedAmount items are permanently destroyed; the
-            // remainder fills the requiredAmount but is returned (tool role).
-            const consumedCount = Math.min(comp.consumedAmount, comp.requiredAmount);
-            for (let j = 0; j < picked.length; j++) {
-                if (!reserveItem(picked[j], j < consumedCount)) return null;
+            if (picked.length < comp.requiredAmount) return null;
+            const partitioned = partitionSelectedItems(picked, comp.requiredAmount, comp.consumedAmount);
+            const consumedIds = new Set(partitioned.consumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+            for (const item of partitioned.required) {
+                const itemId = getItemId(item);
+                if (!reserveItem(item, itemId !== undefined && consumedIds.has(itemId))) return null;
             }
 
-            consumed.push(...picked.slice(0, consumedCount));
-            tools.push(...picked.slice(consumedCount));
+            slotSelections.set(i, partitioned.required);
+        }
+
+        const toolSlots = recipe.components
+            .map((comp, index) => comp.consumedAmount <= 0 ? index : -1)
+            .filter((index): index is number => index >= 0);
+
+        const pickToolItemsForSlot = (
+            slotIndex: number,
+            orderedCandidates: Item[],
+            startIndex: number,
+            requiredAmount: number,
+            picked: Item[],
+            nextToolSlotIndex: number,
+        ): boolean => {
+            if (picked.length >= requiredAmount) {
+                slotSelections.set(slotIndex, [...picked]);
+                const resolved = resolveToolSlots(nextToolSlotIndex);
+                if (resolved) return true;
+                slotSelections.delete(slotIndex);
+                return false;
+            }
+
+            const remainingNeeded = requiredAmount - picked.length;
+            for (let i = startIndex; i <= orderedCandidates.length - remainingNeeded; i++) {
+                const candidate = orderedCandidates[i];
+                const candidateId = getItemId(candidate);
+                if (candidateId === undefined || reservedIds.has(candidateId)) continue;
+
+                reservedIds.add(candidateId);
+                picked.push(candidate);
+                if (pickToolItemsForSlot(slotIndex, orderedCandidates, i + 1, requiredAmount, picked, nextToolSlotIndex)) {
+                    return true;
+                }
+                picked.pop();
+                reservedIds.delete(candidateId);
+            }
+
+            return false;
+        };
+
+        const resolveToolSlots = (toolSlotPosition: number): boolean => {
+            if (toolSlotPosition >= toolSlots.length) return true;
+
+            const slotIndex = toolSlots[toolSlotPosition];
+            const comp = recipe.components[slotIndex];
+            const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds);
+            if (candidates.length < comp.requiredAmount) return false;
+
+            const pinned = this.bulkPinnedToolSelections.get(slotIndex) ?? [];
+            if ((this.bulkPreserveDurabilityBySlot.get(slotIndex) ?? true) && pinned.length > 0) {
+                const pinnedIds = pinned.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
+                const candidateMap = new Map<number, Item>();
+                for (const candidate of candidates) {
+                    const candidateId = getItemId(candidate);
+                    if (candidateId !== undefined && !candidateMap.has(candidateId)) {
+                        candidateMap.set(candidateId, candidate);
+                    }
+                }
+
+                const resolvedPinned: Item[] = [];
+                for (const itemId of pinnedIds) {
+                    const candidate = candidateMap.get(itemId);
+                    if (!candidate || reservedIds.has(itemId)) {
+                        this.setBulkResolutionFailure({
+                            reason: "pinnedToolUnavailable",
+                            slotIndex,
+                            itemTypeOrGroup: comp.type as number,
+                            requestedItemIds: pinnedIds,
+                            candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                        });
+                        return false;
+                    }
+
+                    reservedIds.add(itemId);
+                    resolvedPinned.push(candidate);
+                    if (resolvedPinned.length >= comp.requiredAmount) break;
+                }
+
+                if (resolvedPinned.length < comp.requiredAmount) {
+                    this.setBulkResolutionFailure({
+                        reason: "pinnedToolUnavailable",
+                        slotIndex,
+                        itemTypeOrGroup: comp.type as number,
+                        requestedItemIds: pinnedIds,
+                        candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                    });
+                    return false;
+                }
+
+                slotSelections.set(slotIndex, resolvedPinned);
+                return resolveToolSlots(toolSlotPosition + 1);
+            }
+
+            const orderedCandidates = this.getBulkToolCandidateOrder(slotIndex, candidates);
+            return pickToolItemsForSlot(slotIndex, orderedCandidates, 0, comp.requiredAmount, [], toolSlotPosition + 1);
+        };
+
+        if (!resolveToolSlots(0)) return null;
+
+        const required: Item[] = [];
+        const consumed: Item[] = [];
+        for (let i = 0; i < recipe.components.length; i++) {
+            const comp = recipe.components[i];
+            const picked = slotSelections.get(i) ?? [];
+            const partitioned = partitionSelectedItems(picked, comp.requiredAmount, comp.consumedAmount);
+            consumed.push(...partitioned.consumed);
+            required.push(...partitioned.required);
         }
 
         return {
-            tools,
+            required,
             consumed,
             base,
             permanentlyConsumedIds: newlyConsumedIds,
+            slotSelections,
         };
+    }
+
+    private getBulkToolCandidateOrder(slotIndex: number, candidates: Item[]): Item[] {
+        const pinned = this.bulkPinnedToolSelections.get(slotIndex) ?? [];
+        const ordered: Item[] = [];
+        const seenIds = new Set<number>();
+        const candidateIds = new Set(candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+
+        for (const item of pinned) {
+            const itemId = getItemId(item);
+            if (itemId !== undefined && candidateIds.has(itemId) && !seenIds.has(itemId)) {
+                ordered.push(item);
+                seenIds.add(itemId);
+            }
+        }
+
+        for (const item of candidates) {
+            const itemId = getItemId(item);
+            if (itemId === undefined) continue;
+            if (seenIds.has(itemId)) continue;
+            ordered.push(item);
+            seenIds.add(itemId);
+        }
+
+        return ordered;
     }
 
     private findBulkCandidates(
@@ -1958,7 +4627,8 @@ export default class BetterCraftingPanel extends Component {
     ): Item[] {
         return this.findMatchingItems(type).filter(item => {
             const itemId = getItemId(item);
-            return !excludedIds.has(itemId)
+            return itemId !== undefined
+                && !excludedIds.has(itemId)
                 && !reservedIds.has(itemId)
                 && !isItemProtected(item);
         });
@@ -1998,6 +4668,15 @@ export default class BetterCraftingPanel extends Component {
         this.bcPositionTooltip(mouseX, mouseY);
     }
 
+    private bcShowTextTooltip(title: string, lines: string[], mouseX: number, mouseY: number): void {
+        const el = this.bcGetOrCreateTooltip();
+        el.style.fontSize = window.getComputedStyle(this.element).fontSize;
+        el.style.borderColor = "rgba(180,140,60,0.55)";
+        this.bcFillTooltipForText(el, title, lines);
+        el.style.display = "block";
+        this.bcPositionTooltip(mouseX, mouseY);
+    }
+
     private bcHideTooltip(): void {
         if (this.bcTooltipEl) this.bcTooltipEl.style.display = "none";
     }
@@ -2021,6 +4700,93 @@ export default class BetterCraftingPanel extends Component {
 
     private bcFillTooltipForItem(el: HTMLDivElement, itemType: ItemType, displayName: string, item?: Item): void {
         el.innerHTML = "";
+        this.bcAppendTooltipContent(el, itemType, displayName, item);
+    }
+
+    private bcFillTooltipForText(el: HTMLDivElement, title: string, lines: string[]): void {
+        el.innerHTML = "";
+
+        const titleEl = document.createElement("div");
+        titleEl.textContent = title;
+        titleEl.style.cssText = "color:#d8c79a;font-weight:bold;font-size:1.02em;margin-bottom:4px;";
+        el.appendChild(titleEl);
+
+        for (const line of lines) {
+            const row = document.createElement("div");
+            row.textContent = line;
+            row.style.cssText = "color:#e0d0b0;font-size:0.92em;line-height:1.4;";
+            el.appendChild(row);
+        }
+    }
+
+    private createInfoIcon(title: string, lines: string[]): HTMLButtonElement {
+        const icon = document.createElement("button");
+        icon.type = "button";
+        icon.textContent = "(i)";
+        icon.title = title;
+        icon.setAttribute("aria-label", title);
+        icon.style.cssText = [
+            "display:inline-flex",
+            "align-items:center",
+            "justify-content:center",
+            "margin-left:2px",
+            "padding:0",
+            "border:0",
+            "background:transparent",
+            "color:#c0b080",
+            "font:inherit",
+            "font-size:0.8em",
+            "line-height:1",
+            "cursor:help",
+            "user-select:none",
+        ].join(";");
+
+        let tooltipTimer: number | null = null;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+        const clearTimer = () => {
+            if (tooltipTimer !== null) {
+                clearTimeout(tooltipTimer);
+                tooltipTimer = null;
+            }
+        };
+
+        icon.addEventListener("mouseenter", (e: MouseEvent) => {
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            clearTimer();
+            tooltipTimer = window.setTimeout(() => {
+                tooltipTimer = null;
+                this.bcShowTextTooltip(title, lines, lastMouseX, lastMouseY);
+            }, 250);
+        });
+
+        icon.addEventListener("mousemove", (e: MouseEvent) => {
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            if (this.bcTooltipEl && this.bcTooltipEl.style.display !== "none") {
+                this.bcPositionTooltip(lastMouseX, lastMouseY);
+            }
+        });
+
+        icon.addEventListener("mouseleave", () => {
+            clearTimer();
+            this.bcHideTooltip();
+        });
+
+        icon.addEventListener("mousedown", (e: MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+        icon.addEventListener("click", (e: MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+
+        return icon;
+    }
+
+    private bcAppendTooltipContent(el: HTMLElement, itemType: ItemType, displayName: string, item?: Item): void {
         const desc  = itemDescriptions[itemType as ItemType];
         const color = item ? getQualityColor(item.quality) : "#e0d0b0";
         const fmt   = (s: string) => this.formatEnumName(s);
@@ -2051,28 +4817,16 @@ export default class BetterCraftingPanel extends Component {
             const dur    = item.durability;
             const durMax = item.durabilityMax;
             if (durMax > 0) {
-                const durEl = document.createElement("span");
-                durEl.style.cssText = "color:#9a8860;font-size:0.9em;";
-                durEl.innerHTML = `Durability: <span style="color:#c0b080">${dur}/${durMax}</span>`;
-                propsRow.appendChild(durEl);
+                appendInlineStat(propsRow, "Durability", `${dur}/${durMax}`, "#c0b080", "color:#9a8860;font-size:0.9em;");
             }
-            const weightEl = document.createElement("span");
-            weightEl.style.cssText = "color:#9a8860;font-size:0.9em;";
-            weightEl.innerHTML = `Weight: <span style="color:#c0b080">${item.weight.toFixed(1)}</span>`;
-            propsRow.appendChild(weightEl);
+            appendInlineStat(propsRow, "Weight", item.weight.toFixed(1), "#c0b080", "color:#9a8860;font-size:0.9em;");
         } else if (desc) {
             if (desc.durability !== undefined) {
-                const durEl = document.createElement("span");
-                durEl.style.cssText = "color:#9a8860;font-size:0.9em;";
-                durEl.innerHTML = `Durability: <span style="color:#5eff80">${desc.durability}</span>`;
-                propsRow.appendChild(durEl);
+                appendInlineStat(propsRow, "Durability", String(desc.durability), "#5eff80", "color:#9a8860;font-size:0.9em;");
             }
             const w = desc.weightRange ? `${desc.weightRange[0].toFixed(1)}–${desc.weightRange[1].toFixed(1)}` : desc.weight !== undefined ? desc.weight.toFixed(1) : null;
             if (w) {
-                const weightEl = document.createElement("span");
-                weightEl.style.cssText = "color:#9a8860;font-size:0.9em;";
-                weightEl.innerHTML = `Weight: <span style="color:#c0b080">${w}</span>`;
-                propsRow.appendChild(weightEl);
+                appendInlineStat(propsRow, "Weight", w, "#c0b080", "color:#9a8860;font-size:0.9em;");
             }
         }
         if (propsRow.childElementCount > 0) el.appendChild(propsRow);
@@ -2118,143 +4872,6 @@ export default class BetterCraftingPanel extends Component {
         return div;
     }
 
-    public clearResults(): void {
-        this.clearResultsContainer(this.normalResultsEl);
-        this.clearResultsContainer(this.bulkResultsEl);
-        this.syncResultsVisibility();
-    }
-
-    public showSingleCraftResult(result: ICraftDisplayResult): void {
-        this.renderSingleCraftResult(this.normalResultsEl, result);
-        this.activeTab = "normal";
-        this.syncResultsVisibility();
-    }
-
-    public showBulkCraftResults(results: ICraftDisplayResult[]): void {
-        this.renderBulkCraftResults(this.bulkResultsEl, results);
-        this.syncResultsVisibility();
-    }
-
-    private createResultsContainer(): HTMLDivElement {
-        const el = document.createElement("div");
-        el.className = "bc-results-panel";
-        return el;
-    }
-
-    private clearResultsContainer(el: HTMLDivElement): void {
-        el.innerHTML = "";
-        el.style.display = "none";
-    }
-
-    private syncResultsVisibility(): void {
-        if (this.normalResultsEl) {
-            this.normalResultsEl.style.display = this.activeTab === "normal" && this.normalResultsEl.childElementCount > 0
-                ? ""
-                : "none";
-        }
-
-        if (this.bulkResultsEl) {
-            this.bulkResultsEl.style.display = this.activeTab === "bulk" && this.bulkResultsEl.childElementCount > 0
-                ? ""
-                : "none";
-        }
-    }
-
-    private renderSingleCraftResult(el: HTMLDivElement, result: ICraftDisplayResult): void {
-        el.innerHTML = "";
-        el.appendChild(this.createResultsTitle("Craft Result"));
-
-        const status = document.createElement("div");
-        status.className = `bc-results-status ${result.success ? "bc-results-status-success" : "bc-results-status-failed"}`;
-        status.textContent = result.success ? "Success" : "Failed";
-        el.appendChild(status);
-
-        if (result.item) {
-            this.bcFillTooltipForItem(el, result.item.type, this.getDisplayName(result.item), result.item);
-        } else {
-            const msg = document.createElement("div");
-            msg.className = "bc-results-empty";
-            msg.textContent = `No ${this.formatEnumName(ItemType[result.itemType] || `Item ${result.itemType}`)} was crafted.`;
-            el.appendChild(msg);
-        }
-    }
-
-    private renderBulkCraftResults(el: HTMLDivElement, results: ICraftDisplayResult[]): void {
-        el.innerHTML = "";
-        el.appendChild(this.createResultsTitle("Craft Results"));
-
-        const list = document.createElement("div");
-        list.className = "bc-results-summary-list";
-        const failures = results.filter(result => !result.success || !result.item).length;
-        const counts = new Map<string, { count: number; color: string; sortKey: number }>();
-
-        for (const result of results) {
-            if (!result.success || !result.item) continue;
-
-            const item = result.item;
-            const name = this.getDisplayName(item);
-            const existing = counts.get(name);
-            if (existing) {
-                existing.count++;
-            } else {
-                counts.set(name, {
-                    count: 1,
-                    color: getQualityColor(item.quality),
-                    sortKey: qualitySortKey(item.quality),
-                });
-            }
-        }
-
-        const entries = [...counts.entries()]
-            .sort(([, a], [, b]) => b.sortKey - a.sortKey || a.count - b.count);
-
-        for (const [name, info] of entries) {
-            const line = document.createElement("div");
-            line.className = "bc-results-summary-line";
-            line.style.color = info.color;
-            line.textContent = `${info.count}x ${name}`;
-            list.appendChild(line);
-        }
-
-        if (failures > 0) {
-            const failedLine = document.createElement("div");
-            failedLine.className = "bc-results-summary-line";
-            failedLine.style.color = "#ff8d8d";
-            failedLine.textContent = `${failures}x Failed crafts`;
-            list.appendChild(failedLine);
-        }
-
-        if (list.childElementCount === 0) {
-            const empty = document.createElement("div");
-            empty.className = "bc-results-empty";
-            empty.textContent = "No completed crafts were recorded.";
-            list.appendChild(empty);
-        }
-
-        el.appendChild(list);
-    }
-
-    private createResultsTitle(text: string): HTMLElement {
-        const title = document.createElement("div");
-        title.className = "bc-results-title";
-        title.textContent = text;
-        return title;
-    }
-
-    private getDisplayName(item: Item): string {
-        let displayName: string;
-        try {
-            displayName = this.toTitleCase(item.getName(Article.None).getString());
-        } catch {
-            displayName = this.formatEnumName(ItemType[item.type] || `Item ${item.type}`);
-        }
-
-        const qualityName = getQualityName(item.quality);
-        if (qualityName) displayName = `${qualityName} ${displayName}`;
-
-        return displayName;
-    }
-
     // ── Data helpers ──────────────────────────────────────────────────────────
 
     private getTypeName(type: ItemType | ItemTypeGroup): string {
@@ -2283,7 +4900,7 @@ export default class BetterCraftingPanel extends Component {
             }
         }
 
-        return result.sort((a, b) => qualitySortKey(b.quality) - qualitySortKey(a.quality));
+        return filterSelectableItems(result, getItemId).sort((a, b) => qualitySortKey(b.quality) - qualitySortKey(a.quality));
     }
 
     // ── Craft action ──────────────────────────────────────────────────────────
@@ -2295,6 +4912,20 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < this.recipe.components.length; i++) {
             const comp = this.recipe.components[i];
+            if (this.isSplitComponent(comp)) {
+                const splitSelection = this.getSplitSelection(i);
+                const consumedCount = getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount);
+                const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);
+                if (splitSelection.consumed.length < consumedCount) {
+                    this.showValidationError(`Select ${consumedCount} consumed ${this.getTypeName(comp.type)} (have ${splitSelection.consumed.length})`);
+                    return;
+                }
+                if (splitSelection.used.length < usedCount) {
+                    this.showValidationError(`Select ${usedCount} used ${this.getTypeName(comp.type)} (have ${splitSelection.used.length})`);
+                    return;
+                }
+                continue;
+            }
             const sel  = this.selectedItems.get(i) || [];
             if (sel.length < comp.requiredAmount) {
                 this.showValidationError(`Select ${comp.requiredAmount} ${this.getTypeName(comp.type)} (have ${sel.length})`);
@@ -2306,31 +4937,40 @@ export default class BetterCraftingPanel extends Component {
             return;
         }
 
-        const toolItems: Item[]    = [];
-        const consumeItems: Item[] = [];
-        for (let i = 0; i < this.recipe.components.length; i++) {
-            const comp = this.recipe.components[i];
-            (comp.consumedAmount > 0 ? consumeItems : toolItems).push(...(this.selectedItems.get(i) || []));
-        }
-        const baseItems = this.selectedItems.get(-1) || [];
-        const baseComponent = baseItems[0] as Item | undefined;
+        this.debugLog("NormalCraftPreResolve", this.buildCurrentNormalCraftSelectionState());
+        const resolvedSelection = this.resolveCurrentCraftSelection();
+        if (!resolvedSelection) return;
 
         const pendingIds = new Set<number>();
         for (const [, items] of this.selectedItems) {
-            for (const item of items) pendingIds.add(getItemId(item));
+            for (const item of items) {
+                const itemId = getItemId(item);
+                if (itemId !== undefined) {
+                    pendingIds.add(itemId);
+                }
+            }
         }
         this._pendingSelectionIds = pendingIds;
 
         this.crafting = true;
         try {
-            await this.onCraftCallback(this.itemType, toolItems, consumeItems, baseComponent);
-            this.updateRecipe(this.itemType, false);
+            const orderedSelections = this.recipe.components.map((_, slotIndex) => resolvedSelection.slotSelections.get(slotIndex) ?? []);
+            this.debugLog("NormalCraftExecuteStart", this.buildCraftExecutionDiagnostics(this.itemType, orderedSelections, resolvedSelection.base));
+            await this.onCraftCallback(
+                this.itemType,
+                resolvedSelection.required.length > 0 ? resolvedSelection.required : undefined,
+                resolvedSelection.consumed.length > 0 ? resolvedSelection.consumed : undefined,
+                resolvedSelection.base,
+            );
+            this.scheduleInventoryRefresh();
         } finally {
             this.crafting = false;
+            this.flushQueuedInventoryRefresh();
         }
     }
 
     private showValidationError(msg: string) {
+        if (!this.canAccessElements()) return;
         if (this.validationMsg) this.validationMsg.remove();
         this.validationMsg = new Text();
         this.validationMsg.setText(TranslationImpl.generator(msg));
@@ -2340,6 +4980,11 @@ export default class BetterCraftingPanel extends Component {
         this.validationMsg.style.set("border-left", "3px solid #ff4444");
         this.validationMsg.style.set("background", "rgba(255,68,68,0.08)");
         this.normalScrollInner.append(this.validationMsg);
-        setTimeout(() => { this.validationMsg?.remove(); this.validationMsg = undefined; }, 3000);
+        setTimeout(() => {
+            if (!this.canAccessElements()) return;
+            this.validationMsg?.remove();
+            this.validationMsg = undefined;
+        }, 3000);
     }
 }
+
