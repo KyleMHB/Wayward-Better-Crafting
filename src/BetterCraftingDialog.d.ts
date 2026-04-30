@@ -52,6 +52,8 @@ export default class BetterCraftingPanel extends Component {
     private selectedItems;
     private splitSelectedItems;
     private normalRenderReservations;
+    private explicitSelections;
+    private explicitSelectionSequence;
     private sectionCounters;
     private sectionFilterStates;
     private pendingSectionReselectKeys;
@@ -277,6 +279,10 @@ export default class BetterCraftingPanel extends Component {
     private bcAppendTooltipContent;
     private bcTooltipDivider;
     private getSectionStateKey;
+    private getExplicitSelectionKey;
+    private setExplicitSelection;
+    private pruneExplicitSelection;
+    private collectExplicitReservations;
     private getSectionFilterState;
     private shouldReselectSection;
     private clearSectionReselect;

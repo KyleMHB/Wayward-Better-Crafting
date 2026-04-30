@@ -226,8 +226,8 @@ test("bulk consumed and base sections reserve pinned nonconsumed selections", as
 test("bulk nonconsumed selection changes rebuild consumed and base sections", async () => {
     const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
 
-    assert.match(source, /this\.bulkPinnedUsedSelections\.set\(slotIndex, \[\.\.\.selected\]\);\s*this\.buildBulkContent\(false, true\);/);
-    assert.match(source, /this\.bulkPinnedToolSelections\.set\(slotIndex, selected\);\s*this\.buildBulkContent\(false, true\);/);
+    assert.match(source, /this\.bulkPinnedUsedSelections\.set\(slotIndex, \[\.\.\.selected\]\);\s*this\.setExplicitSelection\("bulk", slotIndex, "used", "used", selected\);\s*this\.buildBulkContent\(false, true\);/);
+    assert.match(source, /this\.bulkPinnedToolSelections\.set\(slotIndex, selected\);\s*this\.setExplicitSelection\("bulk", slotIndex, "tool", "tool", selected\);\s*this\.buildBulkContent\(false, true\);/);
     assert.match(source, /this\.bulkExcludedIds\.set\(slotIndex, excludedSet\);\s*this\.buildBulkContent\(false, true\);/);
     assert.doesNotMatch(source, /let needsRebuild = false;/);
 });
@@ -237,10 +237,14 @@ test("crafting selections reserve duplicate item ids across roles", async () => 
     const runtimeSource = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
 
     assert.match(dialogSource, /type SelectionReservationRole = "base" \| "consumed" \| "used" \| "tool" \| "required" \| "target" \| "excluded";/);
+    assert.match(dialogSource, /private explicitSelections: Map<string, IExplicitSelection> = new Map\(\);/);
+    assert.match(dialogSource, /private collectExplicitReservations\(entries: Array<\[string, IExplicitSelection\]>\): Map<number, SelectionReservationRole> \{/);
     assert.match(dialogSource, /private normalRenderReservations: Map<number, SelectionReservationRole> = new Map\(\);/);
+    assert.match(dialogSource, /this\.normalRenderReservations = this\.collectExplicitReservations\(explicitEntries\);/);
+    assert.match(dialogSource, /this\.setExplicitSelection\("normal", slotIndex, semantic,/);
     assert.match(dialogSource, /this\.reserveItemsForRole\(this\.normalRenderReservations, repaired, role\);/);
     assert.match(dialogSource, /this\.getReservationRoleLabel\(conflictRole\)/);
-    assert.match(dialogSource, /this\.selectedItems\.set\(slotIndex, selected\);\s*this\.rebuildNormalContent\(false\);/);
+    assert.match(dialogSource, /this\.selectedItems\.set\(slotIndex, selected\);\s*this\.setExplicitSelection\("normal", slotIndex, semantic, semantic === "tool" \? "tool" : semantic === "base" \? "base" : "consumed", selected\);\s*this\.rebuildNormalContent\(false\);/);
     assert.match(dialogSource, /this\.hasDuplicateIds\(selectedIdsForRequest\)/);
     assert.match(dialogSource, /this\.getSelectionFailureMessage\(\{ reason: "duplicateSelection" \}\)/);
 
@@ -252,14 +256,18 @@ test("bulk and dismantle reserve nonconsumed selections before consumed targets"
     const dialogSource = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
     const runtimeSource = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
 
+    assert.match(dialogSource, /const preReservedUsedSelections = new Map<number, Item\[\]>\(\);/);
     assert.match(dialogSource, /const preReservedToolSelections = new Map<number, Item\[\]>\(\);/);
+    assert.match(dialogSource, /preReservedUsedSelections\.set\(i, resolvedUsed\);/);
     assert.match(dialogSource, /preReservedToolSelections\.set\(i, resolvedPinned\);/);
     assert.match(dialogSource, /const preReserved = preReservedToolSelections\.get\(slotIndex\);/);
     assert.match(dialogSource, /private isIncludedDismantleTargetItem\(item: Item\): boolean \{/);
     assert.match(dialogSource, /const lockedByRequired = this\.isReservedDismantleRequiredItem\(item\);/);
     assert.match(dialogSource, /targetItemIds\.includes\(requiredItemId\)/);
 
+    assert.match(runtimeSource, /const preReservedUsedSelections = new Map<number, Item\[\]>\(\);/);
     assert.match(runtimeSource, /const preReservedToolSelections = new Map<number, Item\[\]>\(\);/);
+    assert.match(runtimeSource, /preReservedUsedSelections\.set\(i, resolvedUsed\.value\.slice\(0, usedCount\)\);/);
     assert.match(runtimeSource, /preReservedToolSelections\.set\(i, resolvedPinned\.value\.slice\(0, component\.requiredAmount\)\);/);
     assert.match(runtimeSource, /if \(request\.requiredItemId !== undefined && request\.targetItemIds\.includes\(request\.requiredItemId\)\) return;/);
 });

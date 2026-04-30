@@ -1533,10 +1533,26 @@ export default class BetterCrafting extends Mod {
         const required: Item[] = [];
         const consumed: Item[] = [];
         const nextConsumedIds = new Set<number>(sessionConsumedIds);
+        const preReservedUsedSelections = new Map<number, Item[]>();
         const preReservedToolSelections = new Map<number, Item[]>();
 
         for (let i = 0; i < recipe.components.length; i++) {
             const component = recipe.components[i];
+            if (isSplitConsumption(component.requiredAmount, component.consumedAmount)) {
+                const pinnedUsedIds = pinnedUsedSelections.get(i) ?? [];
+                if (pinnedUsedIds.length === 0) continue;
+
+                const resolvedUsed = this.resolveSelectedItems(player, component.type, pinnedUsedIds, reservedIds, {
+                    slotIndex: i,
+                    failureReason: "pinnedToolUnavailable",
+                });
+                const usedCount = getUsedSelectionCount(component.requiredAmount, component.consumedAmount);
+                if (resolvedUsed.value && resolvedUsed.value.length >= usedCount) {
+                    preReservedUsedSelections.set(i, resolvedUsed.value.slice(0, usedCount));
+                }
+                continue;
+            }
+
             if (component.consumedAmount > 0) continue;
 
             const pinnedToolIds = pinnedToolSelections.get(i) ?? [];
@@ -1583,15 +1599,18 @@ export default class BetterCrafting extends Mod {
             if (isSplitConsumption(component.requiredAmount, component.consumedAmount) && pinnedUsedIds.length > 0) {
                 const usedCount = getUsedSelectionCount(component.requiredAmount, component.consumedAmount);
                 const consumedCount = getConsumedSelectionCount(component.requiredAmount, component.consumedAmount);
-                const resolvedUsed = this.resolveSelectedItems(player, component.type, pinnedUsedIds, reservedIds, {
-                    slotIndex: i,
-                    failureReason: "pinnedToolUnavailable",
-                });
-                if (!resolvedUsed.value || resolvedUsed.value.length < usedCount) {
-                    return { failure: resolvedUsed.failure };
+                const usedItems = preReservedUsedSelections.get(i);
+                if (!usedItems || usedItems.length < usedCount) {
+                    return {
+                        failure: this.createSelectionFailure("pinnedToolUnavailable", {
+                            slotIndex: i,
+                            itemTypeOrGroup: component.type as number,
+                            requestedItemIds: pinnedUsedIds,
+                            candidateItemIds: this.findMatchingItems(player, component.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                        }),
+                    };
                 }
 
-                const usedItems = resolvedUsed.value.slice(0, usedCount);
                 const candidates = this.findMatchingItems(player, component.type)
                     .filter(item => {
                         const itemId = getItemId(item);

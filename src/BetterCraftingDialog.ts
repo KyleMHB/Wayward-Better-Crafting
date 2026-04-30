@@ -75,6 +75,12 @@ type SectionSemantic = "base" | "consumed" | "used" | "tool";
 type SectionView = "normal" | "bulk" | "dismantle";
 type SelectionReservationRole = "base" | "consumed" | "used" | "tool" | "required" | "target" | "excluded";
 
+interface IExplicitSelection {
+    itemIds: number[];
+    sequence: number;
+    role: SelectionReservationRole;
+}
+
 interface ISectionFilterState {
     filterText: string;
     sort: ContainerSort;
@@ -225,6 +231,8 @@ export default class BetterCraftingPanel extends Component {
     private selectedItems: Map<number, Item[]> = new Map();
     private splitSelectedItems: Map<number, INormalSplitSelection> = new Map();
     private normalRenderReservations: Map<number, SelectionReservationRole> = new Map();
+    private explicitSelections: Map<string, IExplicitSelection> = new Map();
+    private explicitSelectionSequence = 0;
     private sectionCounters: Map<string, Text> = new Map();
     private sectionFilterStates: Map<string, ISectionFilterState> = new Map();
     private pendingSectionReselectKeys: Set<string> = new Set();
@@ -2542,7 +2550,6 @@ export default class BetterCraftingPanel extends Component {
     }
 
     private normalizeNormalSelectionsForRender(): void {
-        this.normalRenderReservations.clear();
         if (!this.recipe) return;
 
         const repairRole = (
@@ -2556,9 +2563,14 @@ export default class BetterCraftingPanel extends Component {
             const forceTopVisible = this.shouldReselectSection("normal", slotIndex, semantic);
             const repaired = this.repairSelectedItemsForRole(current, candidates, maxCount, this.normalRenderReservations, role, forceTopVisible);
             this.clearSectionReselect("normal", slotIndex, semantic);
+            this.pruneExplicitSelection("normal", slotIndex, semantic, repaired);
             this.reserveItemsForRole(this.normalRenderReservations, repaired, role);
             return repaired;
         };
+
+        const normalPrefix = `normal:${this.itemType ?? 0}:`;
+        const explicitEntries = [...this.explicitSelections.entries()].filter(([key]) => key.startsWith(normalPrefix));
+        this.normalRenderReservations = this.collectExplicitReservations(explicitEntries);
 
         if (this.recipe.baseComponent !== undefined) {
             const candidates = this.getFilteredSortedSectionItems("normal", -1, "base", this.findMatchingItems(this.recipe.baseComponent));
@@ -3214,6 +3226,7 @@ export default class BetterCraftingPanel extends Component {
                 }
             }
             this.selectedItems.set(slotIndex, selected);
+            this.setExplicitSelection("normal", slotIndex, semantic, semantic === "tool" ? "tool" : semantic === "base" ? "base" : "consumed", selected);
             this.rebuildNormalContent(false);
         });
 
@@ -3358,9 +3371,11 @@ export default class BetterCraftingPanel extends Component {
 
             if (semantic === "consumed") {
                 this.setSplitSelection(slotIndex, target, nextSelection.used);
+                this.setExplicitSelection("normal", slotIndex, "consumed", "consumed", target);
                 this.updateCounter(slotIndex, maxSelect, "consumed");
             } else {
                 this.setSplitSelection(slotIndex, nextSelection.consumed, target);
+                this.setExplicitSelection("normal", slotIndex, "used", "used", target);
                 this.updateCounter(slotIndex, maxSelect, "used");
             }
 
@@ -4136,7 +4151,9 @@ export default class BetterCraftingPanel extends Component {
     private normalizeBulkSelectionsForRender(): void {
         if (!this.recipe) return;
 
-        const reservations = new Map<number, SelectionReservationRole>();
+        const bulkPrefix = `bulk:${this.itemType ?? 0}:`;
+        const explicitEntries = [...this.explicitSelections.entries()].filter(([key]) => key.startsWith(bulkPrefix));
+        const reservations = this.collectExplicitReservations(explicitEntries);
         const repairBulkRole = (
             slotIndex: number,
             type: ItemType | ItemTypeGroup,
@@ -4153,6 +4170,7 @@ export default class BetterCraftingPanel extends Component {
             const forceTopVisible = current.length === 0 || this.shouldReselectSection("bulk", slotIndex, semantic);
             const repaired = this.repairSelectedItemsForRole(current, candidates, maxCount, reservations, semantic, forceTopVisible);
             this.clearSectionReselect("bulk", slotIndex, semantic);
+            this.pruneExplicitSelection("bulk", slotIndex, semantic, repaired);
             this.reserveItemsForRole(reservations, repaired, semantic);
             return repaired;
         };
@@ -4432,6 +4450,7 @@ export default class BetterCraftingPanel extends Component {
             }
 
             this.bulkPinnedUsedSelections.set(slotIndex, [...selected]);
+            this.setExplicitSelection("bulk", slotIndex, "used", "used", selected);
             this.buildBulkContent(false, true);
         });
 
@@ -4572,6 +4591,7 @@ export default class BetterCraftingPanel extends Component {
                 }
             }
             this.bulkPinnedToolSelections.set(slotIndex, selected);
+            this.setExplicitSelection("bulk", slotIndex, "tool", "tool", selected);
             this.buildBulkContent(false, true);
         });
 
@@ -4982,6 +5002,7 @@ export default class BetterCraftingPanel extends Component {
         const reservedIds = new Set<number>(permanentlyConsumedIds);
         const newlyConsumedIds = new Set<number>();
         const slotSelections = new Map<number, Item[]>();
+        const preReservedUsedSelections = new Map<number, Item[]>();
         const preReservedToolSelections = new Map<number, Item[]>();
         let base: Item | undefined;
 
@@ -4997,6 +5018,40 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < recipe.components.length; i++) {
             const comp = recipe.components[i];
+            if (this.isSplitComponent(comp)) {
+                const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);
+                const pinnedUsed = this.bulkPinnedUsedSelections.get(i) ?? [];
+                if (pinnedUsed.length === 0) continue;
+
+                const pinnedUsedIds = pinnedUsed.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
+                const candidates = this.getFilteredSortedSectionItems("bulk", i, "used", this.findMatchingItems(comp.type)).filter(item => {
+                    const itemId = getItemId(item);
+                    return itemId !== undefined
+                        && !excludedIds.has(itemId)
+                        && !reservedIds.has(itemId)
+                        && !isItemProtected(item);
+                });
+                const candidateMap = new Map<number, Item>();
+                for (const candidate of candidates) {
+                    const candidateId = getItemId(candidate);
+                    if (candidateId !== undefined && !candidateMap.has(candidateId)) candidateMap.set(candidateId, candidate);
+                }
+
+                const resolvedUsed: Item[] = [];
+                for (const itemId of pinnedUsedIds) {
+                    const candidate = candidateMap.get(itemId);
+                    if (!candidate) break;
+                    reservedIds.add(itemId);
+                    resolvedUsed.push(candidate);
+                    if (resolvedUsed.length >= usedCount) break;
+                }
+
+                if (resolvedUsed.length >= usedCount) {
+                    preReservedUsedSelections.set(i, resolvedUsed);
+                }
+                continue;
+            }
+
             if (comp.consumedAmount > 0) continue;
 
             const pinned = this.bulkPinnedToolSelections.get(i) ?? [];
@@ -5043,43 +5098,14 @@ export default class BetterCraftingPanel extends Component {
             if (this.isSplitComponent(comp)) {
                 const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);
                 const consumedCount = getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount);
-                const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds, i, "used");
-                const pinnedUsed = this.bulkPinnedUsedSelections.get(i) ?? [];
-                const pinnedUsedIds = pinnedUsed.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
-                const candidateMap = new Map<number, Item>();
-                for (const candidate of candidates) {
-                    const candidateId = getItemId(candidate);
-                    if (candidateId !== undefined && !candidateMap.has(candidateId)) {
-                        candidateMap.set(candidateId, candidate);
-                    }
-                }
-
-                const resolvedUsed: Item[] = [];
-                for (const itemId of pinnedUsedIds) {
-                    const candidate = candidateMap.get(itemId);
-                    if (!candidate || reservedIds.has(itemId)) {
-                        this.setBulkResolutionFailure({
-                            reason: "pinnedToolUnavailable",
-                            slotIndex: i,
-                            itemTypeOrGroup: comp.type as number,
-                            requestedItemIds: pinnedUsedIds,
-                            candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
-                        });
-                        return null;
-                    }
-
-                    reservedIds.add(itemId);
-                    resolvedUsed.push(candidate);
-                    if (resolvedUsed.length >= usedCount) break;
-                }
-
+                const resolvedUsed = preReservedUsedSelections.get(i) ?? [];
                 if (resolvedUsed.length < usedCount) {
                     this.setBulkResolutionFailure({
                         reason: "pinnedToolUnavailable",
                         slotIndex: i,
                         itemTypeOrGroup: comp.type as number,
-                        requestedItemIds: pinnedUsedIds,
-                        candidateItemIds: candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                        requestedItemIds: (this.bulkPinnedUsedSelections.get(i) ?? []).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                        candidateItemIds: this.findMatchingItems(comp.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
                     });
                     return null;
                 }
@@ -5517,6 +5543,54 @@ export default class BetterCraftingPanel extends Component {
     private getSectionStateKey(view: SectionView, slotIndex: number, semantic: SectionSemantic): string {
         const activeItemType = view === "dismantle" ? this.dismantleSelectedItemType ?? 0 : this.itemType ?? 0;
         return `${view}:${activeItemType}:${slotIndex}:${semantic}`;
+    }
+
+    private getExplicitSelectionKey(view: SectionView, slotIndex: number, semantic: SectionSemantic): string {
+        return this.getSectionStateKey(view, slotIndex, semantic);
+    }
+
+    private setExplicitSelection(view: SectionView, slotIndex: number, semantic: SectionSemantic, role: SelectionReservationRole, items: readonly Item[]): void {
+        const itemIds = items.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
+        const key = this.getExplicitSelectionKey(view, slotIndex, semantic);
+        if (itemIds.length === 0) {
+            this.explicitSelections.delete(key);
+            return;
+        }
+
+        this.explicitSelections.set(key, {
+            itemIds,
+            role,
+            sequence: ++this.explicitSelectionSequence,
+        });
+    }
+
+    private pruneExplicitSelection(view: SectionView, slotIndex: number, semantic: SectionSemantic, selectedItems: readonly Item[]): void {
+        const key = this.getExplicitSelectionKey(view, slotIndex, semantic);
+        const explicit = this.explicitSelections.get(key);
+        if (!explicit) return;
+
+        const selectedIds = new Set(selectedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+        const itemIds = explicit.itemIds.filter(itemId => selectedIds.has(itemId));
+        if (itemIds.length === 0) {
+            this.explicitSelections.delete(key);
+            return;
+        }
+
+        explicit.itemIds = itemIds;
+    }
+
+    private collectExplicitReservations(entries: Array<[string, IExplicitSelection]>): Map<number, SelectionReservationRole> {
+        const reservations = new Map<number, SelectionReservationRole>();
+        const ordered = [...entries].sort((a, b) => b[1].sequence - a[1].sequence);
+        for (const [, explicit] of ordered) {
+            for (const itemId of explicit.itemIds) {
+                if (!reservations.has(itemId)) {
+                    reservations.set(itemId, explicit.role);
+                }
+            }
+        }
+
+        return reservations;
     }
 
     private getSectionFilterState(view: SectionView, slotIndex: number, semantic: SectionSemantic): ISectionFilterState {
