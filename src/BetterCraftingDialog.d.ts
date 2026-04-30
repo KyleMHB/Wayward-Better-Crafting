@@ -35,6 +35,7 @@ export default class BetterCraftingPanel extends Component {
     private panelMode;
     private tabBar;
     private closeBtn;
+    private craftFrame;
     private scrollContent;
     private normalScrollInner;
     private bulkScrollInner;

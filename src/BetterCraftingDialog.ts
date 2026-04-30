@@ -207,6 +207,7 @@ export default class BetterCraftingPanel extends Component {
     private panelMode: PanelMode = "craft";
     private tabBar!: HTMLDivElement;
     private closeBtn!: HTMLButtonElement;
+    private craftFrame!: Component;
     private scrollContent: Component;
     private normalScrollInner!: Component;
     private bulkScrollInner!: Component;
@@ -681,6 +682,7 @@ export default class BetterCraftingPanel extends Component {
                 .bc-tab-bar {
                     display: flex;
                     flex-shrink: 0;
+                    width: 100%;
                     border-bottom: 1px solid var(--color-border, #554433);
                 }
                 .bc-header-bar {
@@ -688,11 +690,11 @@ export default class BetterCraftingPanel extends Component {
                     align-items: flex-start;
                     gap: 10px;
                     flex-shrink: 0;
-                    padding: 8px 42px 8px 10px;
+                    padding: 8px 14px 0;
                 }
                 .bc-tab-btn {
                     flex: 1;
-                    padding: 6px 10px;
+                    padding: 7px 12px;
                     border: none;
                     cursor: pointer;
                     font-size: 0.92em;
@@ -732,9 +734,9 @@ export default class BetterCraftingPanel extends Component {
                 }
                 .bc-panel-close {
                     position: absolute;
-                    top: 7px;
-                    right: 8px;
-                    z-index: 3;
+                    top: 4px;
+                    right: 5px;
+                    z-index: 4;
                     width: 26px;
                     height: 26px;
                     padding: 0 2px;
@@ -751,6 +753,20 @@ export default class BetterCraftingPanel extends Component {
                 .bc-panel-close:hover {
                     color: #ffffff;
                     opacity: 0.8;
+                }
+                .bc-craft-frame {
+                    display: flex;
+                    flex: 1 1 0;
+                    flex-direction: column;
+                    min-height: 0;
+                    margin: 0 14px;
+                    border: 1px solid var(--bc-panel-accent);
+                    border-radius: 3px;
+                    box-sizing: border-box;
+                    overflow: hidden;
+                }
+                .bc-panel-bulk .bc-craft-frame {
+                    border-color: var(--bc-panel-accent) !important;
                 }
                 .bc-resize-handle {
                     position: absolute;
@@ -1049,6 +1065,11 @@ export default class BetterCraftingPanel extends Component {
                     min-height: 22px;
                     padding: 0 !important;
                 }
+                .bc-panel-dismantle .bc-craft-frame {
+                    margin: 0 !important;
+                    border: 0 !important;
+                    border-radius: 0 !important;
+                }
                 .bc-panel-dismantle .dialog-footer {
                     border-top-color: #5c2f24 !important;
                 }
@@ -1236,6 +1257,10 @@ export default class BetterCraftingPanel extends Component {
         headerBar.appendChild(closeBtn);
         this.element.appendChild(headerBar);
 
+        this.craftFrame = new Component();
+        this.craftFrame.classes.add("bc-craft-frame");
+        this.append(this.craftFrame);
+
         const rightResizeHandle = document.createElement("div");
         rightResizeHandle.className = "bc-resize-handle bc-resize-handle-right";
         rightResizeHandle.addEventListener("mousedown", (e: MouseEvent) => this.beginResize("right", e));
@@ -1261,7 +1286,7 @@ export default class BetterCraftingPanel extends Component {
         this.normalBody.style.set("overflow", "hidden");
         this.normalBody.style.set("padding", "8px 10px");
         this.normalBody.style.set("gap", "8px");
-        this.append(this.normalBody);
+        this.craftFrame.append(this.normalBody);
 
         this.normalStaticContent = this.createStaticContentContainer();
         this.normalBody.append(this.normalStaticContent);
@@ -1298,7 +1323,7 @@ export default class BetterCraftingPanel extends Component {
         this.bulkBody.style.set("padding", "8px 10px");
         this.bulkBody.style.set("gap", "8px");
         this.bulkBody.style.set("display", "none");
-        this.append(this.bulkBody);
+        this.craftFrame.append(this.bulkBody);
 
         this.bulkStaticContent = this.createStaticContentContainer();
         this.bulkBody.append(this.bulkStaticContent);

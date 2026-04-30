@@ -63,6 +63,15 @@ test("normal and bulk tabs keep distinct gold and blue identities", async () => 
     assert.doesNotMatch(source, /\.bc-tab-btn\.bc-tab-active \{/);
 });
 
+test("craft frame follows panel accent while dismantle neutralizes the frame", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    assert.match(source, /private craftFrame!: Component;/);
+    assert.match(source, /\.bc-craft-frame \{[\s\S]*border: 1px solid var\(--bc-panel-accent\);/);
+    assert.match(source, /\.bc-panel-bulk \.bc-craft-frame \{[\s\S]*border-color: var\(--bc-panel-accent\) !important;/);
+    assert.match(source, /\.bc-panel-dismantle \.bc-craft-frame \{[\s\S]*border: 0 !important;/);
+});
+
 test("craft stamina is normalized through the shared helper for bulk and normal craft", async () => {
     const helperSource = await readFile(new URL("../src/craftStamina.ts", import.meta.url), "utf8");
     const dialogSource = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
