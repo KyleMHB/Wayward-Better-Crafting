@@ -67,9 +67,11 @@ test("craft frame follows panel accent while dismantle neutralizes the frame", a
     const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
 
     assert.match(source, /private craftFrame!: Component;/);
+    assert.match(source, /\.bc-panel-close \{[\s\S]*top: 0;/);
     assert.match(source, /\.bc-craft-frame \{[\s\S]*border: 1px solid var\(--bc-panel-accent\);/);
     assert.match(source, /\.bc-panel-bulk \.bc-craft-frame \{[\s\S]*border-color: var\(--bc-panel-accent\) !important;/);
     assert.match(source, /\.bc-panel-dismantle \.bc-craft-frame \{[\s\S]*border: 0 !important;/);
+    assert.doesNotMatch(source, /Footer[\s\S]*?style\.set\("border-top", "1px solid var\(--color-border, #554433\)"\)/);
 });
 
 test("craft stamina is normalized through the shared helper for bulk and normal craft", async () => {

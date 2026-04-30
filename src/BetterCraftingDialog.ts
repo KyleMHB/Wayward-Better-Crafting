@@ -734,7 +734,7 @@ export default class BetterCraftingPanel extends Component {
                 }
                 .bc-panel-close {
                     position: absolute;
-                    top: 4px;
+                    top: 0;
                     right: 5px;
                     z-index: 4;
                     width: 26px;
@@ -1298,7 +1298,6 @@ export default class BetterCraftingPanel extends Component {
         this.normalFooter = new Component();
         this.normalFooter.classes.add("dialog-footer");
         this.normalFooter.style.set("padding", "8px 10px");
-        this.normalFooter.style.set("border-top", "1px solid var(--color-border, #554433)");
         this.normalFooter.style.set("display", "flex");
         this.normalFooter.style.set("gap", "6px");
         this.normalFooter.style.set("flex-shrink", "0");
@@ -1335,7 +1334,6 @@ export default class BetterCraftingPanel extends Component {
         this.bulkFooter = new Component();
         this.bulkFooter.classes.add("dialog-footer");
         this.bulkFooter.style.set("padding", "8px 10px");
-        this.bulkFooter.style.set("border-top", "1px solid var(--color-border, #554433)");
         this.bulkFooter.style.set("display", "none"); // hidden until tab switch
         this.bulkFooter.style.set("gap", "8px");
         this.bulkFooter.style.set("flex-shrink", "0");
