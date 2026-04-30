@@ -129,6 +129,8 @@ export default class BetterCraftingPanel extends Component {
     private bindTooltipRowHandlers;
     constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback, onDismantle: DismantleCallback, getSettings: SettingsAccessor, initialSafeCrafting?: boolean);
     destroyListeners(): void;
+    private clearSectionFilterStates;
+    private resetWindowSessionState;
     private canAccessElements;
     private _subscribeInventoryWatch;
     private _unsubscribeInventoryWatch;

@@ -281,6 +281,38 @@ test("normal section counters render from current selected counts", async () => 
     assert.match(source, /const count = this\.getSelectedCountForSection\(slotIndex, semantic\);/);
 });
 
+test("closing crafting clears per-window selections exclusions reservations and filters", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    const resetStart = source.indexOf("private resetWindowSessionState(): void {");
+    const resetEnd = source.indexOf("private canAccessElements", resetStart);
+    const resetSource = source.slice(resetStart, resetEnd);
+    assert.match(resetSource, /this\.selectedItems\.clear\(\);/);
+    assert.match(resetSource, /this\.splitSelectedItems\.clear\(\);/);
+    assert.match(resetSource, /this\._pendingSelectionIds = null;/);
+    assert.match(resetSource, /this\._pendingSplitSelectionIds = null;/);
+    assert.match(resetSource, /this\.explicitSelections\.clear\(\);/);
+    assert.match(resetSource, /this\.normalRenderReservations\.clear\(\);/);
+    assert.match(resetSource, /this\.sectionCounters\.clear\(\);/);
+    assert.match(resetSource, /this\.pendingSectionReselectKeys\.clear\(\);/);
+    assert.match(resetSource, /this\.clearSectionFilterStates\(\);/);
+    assert.match(resetSource, /this\.bulkExcludedIds\.clear\(\);/);
+    assert.match(resetSource, /this\.bulkPinnedToolSelections\.clear\(\);/);
+    assert.match(resetSource, /this\.bulkPinnedUsedSelections\.clear\(\);/);
+    assert.match(resetSource, /this\.bulkQuantity = 1;/);
+    assert.match(resetSource, /this\.dismantleExcludedIds\.clear\(\);/);
+    assert.match(resetSource, /this\.dismantleRequiredSelection = undefined;/);
+    assert.match(source, /public hidePanel\(\) \{[\s\S]*this\.resetWindowSessionState\(\);/);
+});
+
+test("fresh crafting sections default to quality descending after reset", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    assert.match(source, /private clearSectionFilterStates\(\): void \{[\s\S]*this\.sectionFilterStates\.clear\(\);/);
+    assert.match(source, /sort: ContainerSort\.Quality,\s+sortDirection: SortDirection\.Descending,/);
+    assert.match(source, /public showPanel\(\) \{[\s\S]*if \(!wasVisible\) \{[\s\S]*this\.clearSectionFilterStates\(\);/);
+});
+
 test("bulk and dismantle reserve nonconsumed selections before consumed targets", async () => {
     const dialogSource = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
     const runtimeSource = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");

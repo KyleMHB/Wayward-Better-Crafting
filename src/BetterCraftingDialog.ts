@@ -1494,6 +1494,44 @@ export default class BetterCraftingPanel extends Component {
         this._sectionResizeObserver = undefined;
     }
 
+    private clearSectionFilterStates(): void {
+        for (const state of this.sectionFilterStates.values()) {
+            if (state.debounceTimer !== null) {
+                clearTimeout(state.debounceTimer);
+                state.debounceTimer = null;
+            }
+        }
+        this.sectionFilterStates.clear();
+    }
+
+    private resetWindowSessionState(): void {
+        this.selectedItems.clear();
+        this.splitSelectedItems.clear();
+        this._pendingSelectionIds = null;
+        this._pendingSplitSelectionIds = null;
+        this.explicitSelections.clear();
+        this.normalRenderReservations.clear();
+        this.sectionCounters.clear();
+        this.pendingSectionReselectKeys.clear();
+        this.clearSectionFilterStates();
+
+        this.bulkExcludedIds.clear();
+        this.bulkPreserveDurabilityBySlot.clear();
+        this.bulkPinnedToolSelections.clear();
+        this.bulkPinnedUsedSelections.clear();
+        this._lastBulkItemType = 0;
+        this.bulkQuantity = 1;
+        if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = "1";
+        this._bulkContentDirty = true;
+        this.lastBulkResolutionMessage = undefined;
+
+        this.dismantleExcludedIds.clear();
+        this.dismantleDescription = undefined;
+        this.dismantleRequiredSelection = undefined;
+        this.dismantleSelectedItemType = undefined;
+        this.preserveDismantleRequiredDurability = true;
+    }
+
     private canAccessElements(): boolean {
         return !this.destroyed && !!this.element?.isConnected;
     }
@@ -2123,6 +2161,7 @@ export default class BetterCraftingPanel extends Component {
         const wasVisible = this.panelVisible;
 
         if (!wasVisible) {
+            this.clearSectionFilterStates();
             if (this.panelMode === "craft") {
                 this.switchTab("normal");
             }
@@ -2144,16 +2183,7 @@ export default class BetterCraftingPanel extends Component {
             clearTimeout(this._inventoryRefreshTimer);
             this._inventoryRefreshTimer = null;
         }
-        this.bulkExcludedIds.clear();
-        this.bulkPreserveDurabilityBySlot.clear();
-        this.bulkPinnedToolSelections.clear();
-        this.bulkPinnedUsedSelections.clear();
-        this.dismantleExcludedIds.clear();
-        this._lastBulkItemType = 0;
-        this.dismantleDescription = undefined;
-        this.dismantleRequiredSelection = undefined;
-        this.dismantleSelectedItemType = undefined;
-        this.preserveDismantleRequiredDurability = true;
+        this.resetWindowSessionState();
         this.resetSafeCraftingEnabled();
         this.resetHelpBoxStates();
         this.panelMode = "craft";
