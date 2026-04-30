@@ -1614,11 +1614,37 @@ export default class BetterCraftingPanel extends Component {
         return reservedRole !== undefined && reservedRole !== currentRole ? reservedRole : undefined;
     }
 
-    private filterUnreservedItems(items: readonly Item[], reservations: ReadonlyMap<number, SelectionReservationRole>): Item[] {
+    private filterUnreservedItems(
+        items: readonly Item[],
+        reservations: ReadonlyMap<number, SelectionReservationRole>,
+        currentRole?: SelectionReservationRole,
+    ): Item[] {
         return items.filter(item => {
             const itemId = getItemId(item);
-            return itemId === undefined || !reservations.has(itemId);
+            if (itemId === undefined) return true;
+            const reservedRole = reservations.get(itemId);
+            return reservedRole === undefined || reservedRole === currentRole;
         });
+    }
+
+    private repairSelectedItemsForRole(
+        selectedItems: readonly Item[],
+        candidates: readonly Item[],
+        maxCount: number,
+        reservations: ReadonlyMap<number, SelectionReservationRole>,
+        role: SelectionReservationRole,
+        forceTopVisible = false,
+    ): Item[] {
+        const selectableCandidates = this.filterUnreservedItems(candidates, reservations, role);
+        if (forceTopVisible) return selectableCandidates.slice(0, maxCount);
+
+        const candidateValidSelection = this.sanitizeSelectedItems([...selectedItems], candidates, maxCount);
+        const repairedSelection = this.sanitizeSelectedItems([...selectedItems], selectableCandidates, maxCount);
+        if (repairedSelection.length < candidateValidSelection.length) {
+            return this.supplementSelectedItems(repairedSelection, selectableCandidates, maxCount);
+        }
+
+        return repairedSelection;
     }
 
     private hasDuplicateItemIds(items: readonly Item[]): boolean {
@@ -2343,7 +2369,7 @@ export default class BetterCraftingPanel extends Component {
         const scrollLeft = preserveScroll ? this.scrollContent.element.scrollLeft : 0;
 
         this.sectionCounters.clear();
-        this.normalRenderReservations.clear();
+        this.normalizeNormalSelectionsForRender();
         this.normalStaticContent.dump();
         this.normalScrollInner.dump();
 
@@ -2515,6 +2541,66 @@ export default class BetterCraftingPanel extends Component {
             consumed: repairedConsumed,
             used: repairedUsed,
         };
+    }
+
+    private normalizeNormalSelectionsForRender(): void {
+        this.normalRenderReservations.clear();
+        if (!this.recipe) return;
+
+        const repairRole = (
+            slotIndex: number,
+            semantic: SectionSemantic,
+            role: SelectionReservationRole,
+            current: readonly Item[],
+            candidates: readonly Item[],
+            maxCount: number,
+        ): Item[] => {
+            const forceTopVisible = this.shouldReselectSection("normal", slotIndex, semantic);
+            const repaired = this.repairSelectedItemsForRole(current, candidates, maxCount, this.normalRenderReservations, role, forceTopVisible);
+            this.clearSectionReselect("normal", slotIndex, semantic);
+            this.reserveItemsForRole(this.normalRenderReservations, repaired, role);
+            return repaired;
+        };
+
+        if (this.recipe.baseComponent !== undefined) {
+            const candidates = this.getFilteredSortedSectionItems("normal", -1, "base", this.findMatchingItems(this.recipe.baseComponent));
+            this.selectedItems.set(-1, repairRole(-1, "base", "base", this.selectedItems.get(-1) ?? [], candidates, 1));
+        }
+
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const component = this.recipe.components[i];
+            if (component.consumedAmount <= 0) continue;
+
+            const candidates = this.getFilteredSortedSectionItems("normal", i, "consumed", this.findMatchingItems(component.type));
+            if (this.isSplitComponent(component)) {
+                const splitSelection = this.getSplitSelection(i);
+                const consumed = repairRole(i, "consumed", "consumed", splitSelection.consumed, candidates, getConsumedSelectionCount(component.requiredAmount, component.consumedAmount));
+                this.setSplitSelection(i, consumed, splitSelection.used);
+                continue;
+            }
+
+            this.clearSplitSelection(i);
+            this.selectedItems.set(i, repairRole(i, "consumed", "consumed", this.selectedItems.get(i) ?? [], candidates, component.requiredAmount));
+        }
+
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const component = this.recipe.components[i];
+            if (!this.isSplitComponent(component)) continue;
+
+            const splitSelection = this.getSplitSelection(i);
+            const candidates = this.getFilteredSortedSectionItems("normal", i, "used", this.findMatchingItems(component.type));
+            const used = repairRole(i, "used", "used", splitSelection.used, candidates, getUsedSelectionCount(component.requiredAmount, component.consumedAmount));
+            this.setSplitSelection(i, splitSelection.consumed, used);
+        }
+
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const component = this.recipe.components[i];
+            if (component.consumedAmount > 0) continue;
+
+            const candidates = this.getFilteredSortedSectionItems("normal", i, "tool", this.findMatchingItems(component.type));
+            this.clearSplitSelection(i);
+            this.selectedItems.set(i, repairRole(i, "tool", "tool", this.selectedItems.get(i) ?? [], candidates, component.requiredAmount));
+        }
     }
 
     private reportSelectionUnavailable(
@@ -2801,14 +2887,6 @@ export default class BetterCraftingPanel extends Component {
 
         const items = this.findMatchingItems(baseType);
         const visibleItems = this.getFilteredSortedSectionItems("normal", -1, "base", items);
-        const selectableItems = this.filterUnreservedItems(visibleItems, this.normalRenderReservations);
-        if (this.shouldReselectSection("normal", -1, "base")) {
-            this.selectedItems.set(-1, selectableItems.slice(0, 1));
-            this.clearSectionReselect("normal", -1, "base");
-        } else {
-            this.selectedItems.set(-1, this.sanitizeSelectedItems(this.selectedItems.get(-1) ?? [], selectableItems, 1));
-        }
-        this.reserveItemsForRole(this.normalRenderReservations, this.selectedItems.get(-1) ?? [], "base");
         this.appendSectionHeader(labelRow, `Base: ${this.getTypeName(baseType)}`, this.formatAvailableCount(visibleItems.length, items.length), "base");
 
         const counter = new Text();
@@ -2844,34 +2922,7 @@ export default class BetterCraftingPanel extends Component {
         const items = this.findMatchingItems(component.type);
         const sortedVisibleItems = this.getFilteredSortedSectionItems("normal", index, semantic, items);
         const visibleItems = sortedVisibleItems;
-        const selectableItems = this.filterUnreservedItems(visibleItems, this.normalRenderReservations);
         const totalAvailableCount = items.length;
-
-        if (this.shouldReselectSection("normal", index, semantic)) {
-            if (split && semantic === "consumed") {
-                this.setSplitSelection(index, selectableItems.slice(0, maxSelect), this.getSplitSelection(index).used);
-            } else if (split && semantic === "used") {
-                this.setSplitSelection(index, this.getSplitSelection(index).consumed, selectableItems.slice(0, maxSelect));
-            } else {
-                this.clearSplitSelection(index);
-                this.selectedItems.set(index, selectableItems.slice(0, maxSelect));
-            }
-            this.clearSectionReselect("normal", index, semantic);
-        } else if (split && semantic === "consumed") {
-            this.setSplitSelection(index, this.sanitizeSelectedItems(this.getSplitSelection(index).consumed, selectableItems, maxSelect), this.getSplitSelection(index).used);
-        } else if (split && semantic === "used") {
-            this.setSplitSelection(index, this.getSplitSelection(index).consumed, this.sanitizeSelectedItems(this.getSplitSelection(index).used, selectableItems, maxSelect));
-        } else {
-            this.clearSplitSelection(index);
-            this.selectedItems.set(index, this.sanitizeSelectedItems(this.selectedItems.get(index) ?? [], selectableItems, maxSelect));
-        }
-        if (split && semantic === "consumed") {
-            this.reserveItemsForRole(this.normalRenderReservations, this.getSplitSelection(index).consumed, "consumed");
-        } else if (split && semantic === "used") {
-            this.reserveItemsForRole(this.normalRenderReservations, this.getSplitSelection(index).used, "used");
-        } else {
-            this.reserveItemsForRole(this.normalRenderReservations, this.selectedItems.get(index) ?? [], semantic === "tool" ? "tool" : "consumed");
-        }
 
         this.appendSectionHeader(labelRow, `${this.getTypeName(component.type)} ×${maxSelect}`, this.formatAvailableCount(visibleItems.length, totalAvailableCount), semantic);
 
@@ -3156,24 +3207,16 @@ export default class BetterCraftingPanel extends Component {
             const idx = selected.indexOf(item);
             if (idx >= 0) {
                 selected.splice(idx, 1);
-                check.setChecked(false, false);
-                row.style.set("background", "transparent");
-                row.style.set("border", borderBase);
             } else {
                 if (selected.length >= maxSelect) {
                     if (maxSelect !== 1 || selected.length === 0) return;
                     selected.splice(0, selected.length, item);
-                    this.selectedItems.set(slotIndex, selected);
-                    this.rebuildNormalContent(false);
-                    return;
+                } else {
+                    selected.unshift(item);
                 }
-                selected.unshift(item);
-                check.setChecked(true, false);
-                row.style.set("background", "rgba(30, 255, 128, 0.1)");
-                row.style.set("border", borderSelected);
             }
             this.selectedItems.set(slotIndex, selected);
-            this.updateCounter(slotIndex, maxSelect, semantic);
+            this.rebuildNormalContent(false);
         });
 
         parent.append(row);
@@ -3368,6 +3411,7 @@ export default class BetterCraftingPanel extends Component {
             this.bulkPinnedUsedSelections.clear();
             this._lastBulkItemType = this.itemType;
         }
+        this.normalizeBulkSelectionsForRender();
 
         this.buildOutputCard(this.itemType as ItemType, this.recipe, true);
         this.addBulkHelpBox();
@@ -4013,19 +4057,6 @@ export default class BetterCraftingPanel extends Component {
         const sortedVisibleItems = this.getFilteredSortedSectionItems("bulk", slotIndex, sectionSemantic, items);
         const reservedNonconsumedIds = this.getBulkReservedNonconsumedIds();
         const isConsumedSide = sectionSemantic === "base" || semantic === "consumed";
-        const selectableItems = sortedVisibleItems.filter(item => {
-            const itemId = getItemId(item);
-            const excludedIds = this.bulkExcludedIds.get(slotIndex) ?? new Set<number>();
-            if (semantic === "used") {
-                return itemId === undefined || !excludedIds.has(itemId);
-            }
-
-            if (isConsumedSide) {
-                return itemId === undefined || (!excludedIds.has(itemId) && !reservedNonconsumedIds.has(itemId));
-            }
-
-            return true;
-        });
         const visibleItems = sortedVisibleItems;
         const availableCount = items.filter(item => {
             const itemId = getItemId(item);
@@ -4055,13 +4086,6 @@ export default class BetterCraftingPanel extends Component {
             if (!this.bulkExcludedIds.has(slotIndex)) {
                 this.bulkExcludedIds.set(slotIndex, new Set<number>());
             }
-            if (semantic === "tool" && slotIndex >= 0) {
-                this.bulkPinnedToolSelections.set(slotIndex, this.getBulkToolSelection(slotIndex, selectableItems, requiredAmount, this.shouldReselectSection("bulk", slotIndex, sectionSemantic)));
-            }
-            if (semantic === "used" && slotIndex >= 0) {
-                this.bulkPinnedUsedSelections.set(slotIndex, this.getBulkUsedSelection(slotIndex, selectableItems, requiredAmount, this.shouldReselectSection("bulk", slotIndex, sectionSemantic)));
-            }
-            this.clearSectionReselect("bulk", slotIndex, sectionSemantic);
             for (const item of visibleItems) {
                 if (semantic === "consumed" || slotIndex < 0) {
                     this.addBulkItemRow(itemsContainer, slotIndex, item);
@@ -4074,32 +4098,6 @@ export default class BetterCraftingPanel extends Component {
         }
 
         this.bulkScrollInner.append(section);
-    }
-
-    private getBulkToolSelection(slotIndex: number, items: Item[], maxSelect: number, forceTopVisible = false): Item[] {
-        if (forceTopVisible) return items.slice(0, maxSelect);
-
-        const selected = this.bulkPinnedToolSelections.get(slotIndex) ?? [];
-        if (selected.length === 0) return items.slice(0, maxSelect);
-        const orderedIds = selected.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
-        const preserved = this.getItemsByOrderedIds(items, orderedIds).slice(0, maxSelect);
-        if (preserved.length >= maxSelect) return preserved;
-        return preserved;
-    }
-
-    private getBulkUsedSelection(slotIndex: number, items: Item[], maxSelect: number, forceTopVisible = false): Item[] {
-        if (forceTopVisible) return items.slice(0, maxSelect);
-
-        const selected = this.bulkPinnedUsedSelections.get(slotIndex) ?? [];
-        if (selected.length === 0) return items.slice(0, maxSelect);
-        const excluded = this.bulkExcludedIds.get(slotIndex) ?? new Set<number>();
-        const orderedIds = selected.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
-        const preserved = this.getItemsByOrderedIds(items, orderedIds).filter(item => {
-            const itemId = getItemId(item);
-            return itemId !== undefined && !excluded.has(itemId);
-        }).slice(0, maxSelect);
-        if (preserved.length >= maxSelect) return preserved;
-        return preserved;
     }
 
     private getBulkReservedNonconsumedIds(): Set<number> {
@@ -4135,6 +4133,51 @@ export default class BetterCraftingPanel extends Component {
         }
 
         return undefined;
+    }
+
+    private normalizeBulkSelectionsForRender(): void {
+        if (!this.recipe) return;
+
+        const reservations = new Map<number, SelectionReservationRole>();
+        const repairBulkRole = (
+            slotIndex: number,
+            type: ItemType | ItemTypeGroup,
+            semantic: "used" | "tool",
+            current: readonly Item[],
+            maxCount: number,
+        ): Item[] => {
+            const candidates = this.getFilteredSortedSectionItems("bulk", slotIndex, semantic, this.findMatchingItems(type)).filter(item => {
+                const itemId = getItemId(item);
+                return itemId !== undefined
+                    && !isItemProtected(item)
+                    && (semantic !== "used" || !(this.bulkExcludedIds.get(slotIndex)?.has(itemId) ?? false));
+            });
+            const forceTopVisible = current.length === 0 || this.shouldReselectSection("bulk", slotIndex, semantic);
+            const repaired = this.repairSelectedItemsForRole(current, candidates, maxCount, reservations, semantic, forceTopVisible);
+            this.clearSectionReselect("bulk", slotIndex, semantic);
+            this.reserveItemsForRole(reservations, repaired, semantic);
+            return repaired;
+        };
+
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const comp = this.recipe.components[i];
+            if (!this.isSplitComponent(comp)) continue;
+
+            this.bulkPinnedUsedSelections.set(
+                i,
+                repairBulkRole(i, comp.type, "used", this.bulkPinnedUsedSelections.get(i) ?? [], getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount)),
+            );
+        }
+
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const comp = this.recipe.components[i];
+            if (comp.consumedAmount > 0) continue;
+
+            this.bulkPinnedToolSelections.set(
+                i,
+                repairBulkRole(i, comp.type, "tool", this.bulkPinnedToolSelections.get(i) ?? [], comp.requiredAmount),
+            );
+        }
     }
 
     private addBulkItemRow(parent: Component, slotIndex: number, item: Item): void {
@@ -4252,8 +4295,7 @@ export default class BetterCraftingPanel extends Component {
                     row.style.set("border", `1px solid ${qualityColor}33`);
                 }
                 this.bulkExcludedIds.set(slotIndex, excludedSet);
-                this.updateBulkMaxDisplay();
-                this.updateBulkCraftBtnState();
+                this.buildBulkContent(false, true);
             });
         }
 

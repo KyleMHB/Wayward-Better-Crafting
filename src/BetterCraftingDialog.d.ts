@@ -142,6 +142,7 @@ export default class BetterCraftingPanel extends Component {
     private reserveItemsForRole;
     private getReservationConflict;
     private filterUnreservedItems;
+    private repairSelectedItemsForRole;
     private hasDuplicateItemIds;
     private hasDuplicateIds;
     private supplementSelectedItems;
@@ -185,6 +186,7 @@ export default class BetterCraftingPanel extends Component {
     private clearSplitSelection;
     private collectCurrentSplitSelectionIds;
     private repairSplitSelection;
+    private normalizeNormalSelectionsForRender;
     private reportSelectionUnavailable;
     private resolveComponentSelection;
     private collectCurrentNormalSelectionIds;
@@ -229,10 +231,9 @@ export default class BetterCraftingPanel extends Component {
     private addBulkHelpBox;
     private addBulkMaterialsHeader;
     private addBulkComponentSection;
-    private getBulkToolSelection;
-    private getBulkUsedSelection;
     private getBulkReservedNonconsumedIds;
     private getBulkReservedNonconsumedRole;
+    private normalizeBulkSelectionsForRender;
     private addBulkItemRow;
     private addBulkUsedRow;
     private addBulkToolRow;

@@ -191,8 +191,10 @@ test("section filters drive visible item ordering and active reselection", async
     assert.match(source, /private getFilteredSortedSectionItems\(/);
     assert.match(source, /ItemSort\.createSorter\(state\.sort, state\.sortDirection\)/);
     assert.match(source, /private pendingSectionReselectKeys: Set<string> = new Set\(\);/);
-    assert.match(source, /this\.selectedItems\.set\(-1, selectableItems\.slice\(0, 1\)\);/);
-    assert.match(source, /this\.bulkPinnedToolSelections\.set\(slotIndex, this\.getBulkToolSelection\(slotIndex, selectableItems, requiredAmount/);
+    assert.match(source, /private normalizeNormalSelectionsForRender\(\): void \{/);
+    assert.match(source, /this\.normalizeNormalSelectionsForRender\(\);/);
+    assert.match(source, /private normalizeBulkSelectionsForRender\(\): void \{/);
+    assert.match(source, /this\.normalizeBulkSelectionsForRender\(\);/);
     assert.match(source, /this\.dismantleExcludedIds\.clear\(\);/);
     assert.match(source, /if \(this\.isTypingInEditableControl\(e\.target\)\) return;/);
     assert.match(source, /direction\.textContent = "↕";/);
@@ -214,8 +216,9 @@ test("bulk consumed and base sections reserve pinned nonconsumed selections", as
     assert.match(source, /addSelectionIds\(this\.bulkPinnedUsedSelections\);[\s\S]*addSelectionIds\(this\.bulkPinnedToolSelections\);/);
     assert.match(source, /const isConsumedSide = sectionSemantic === "base" \|\| semantic === "consumed";/);
 
-    const reservedCandidateFilters = source.match(/!reservedNonconsumedIds\.has\(itemId\)/g) ?? [];
-    assert.equal(reservedCandidateFilters.length, 2);
+    assert.match(source, /this\.bulkPinnedUsedSelections\.set\(/);
+    assert.match(source, /this\.bulkPinnedToolSelections\.set\(/);
+    assert.match(source, /!reservedNonconsumedIds\.has\(itemId\)/);
 });
 
 test("bulk nonconsumed selection changes rebuild consumed and base sections", async () => {
@@ -223,6 +226,7 @@ test("bulk nonconsumed selection changes rebuild consumed and base sections", as
 
     assert.match(source, /this\.bulkPinnedUsedSelections\.set\(slotIndex, \[\.\.\.selected\]\);\s*this\.buildBulkContent\(false, true\);/);
     assert.match(source, /this\.bulkPinnedToolSelections\.set\(slotIndex, selected\);\s*this\.buildBulkContent\(false, true\);/);
+    assert.match(source, /this\.bulkExcludedIds\.set\(slotIndex, excludedSet\);\s*this\.buildBulkContent\(false, true\);/);
     assert.doesNotMatch(source, /let needsRebuild = false;/);
 });
 
@@ -232,8 +236,9 @@ test("crafting selections reserve duplicate item ids across roles", async () => 
 
     assert.match(dialogSource, /type SelectionReservationRole = "base" \| "consumed" \| "used" \| "tool" \| "required" \| "target" \| "excluded";/);
     assert.match(dialogSource, /private normalRenderReservations: Map<number, SelectionReservationRole> = new Map\(\);/);
-    assert.match(dialogSource, /this\.reserveItemsForRole\(this\.normalRenderReservations, this\.selectedItems\.get\(-1\) \?\? \[\], "base"\);/);
+    assert.match(dialogSource, /this\.reserveItemsForRole\(this\.normalRenderReservations, repaired, role\);/);
     assert.match(dialogSource, /this\.getReservationRoleLabel\(conflictRole\)/);
+    assert.match(dialogSource, /this\.selectedItems\.set\(slotIndex, selected\);\s*this\.rebuildNormalContent\(false\);/);
     assert.match(dialogSource, /this\.hasDuplicateIds\(selectedIdsForRequest\)/);
     assert.match(dialogSource, /this\.getSelectionFailureMessage\(\{ reason: "duplicateSelection" \}\)/);
 
