@@ -195,6 +195,7 @@ export default class BetterCraftingPanel extends Component {
     private toTitleCase;
     private formatEnumName;
     private updateCraftButtonState;
+    private getSelectedCountForSection;
     private updateCounter;
     private buildOutputCard;
     private getSemanticTooltip;

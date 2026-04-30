@@ -252,6 +252,35 @@ test("crafting selections reserve duplicate item ids across roles", async () => 
     assert.match(runtimeSource, /failure: this\.createSelectionFailure\("duplicateSelection"/);
 });
 
+test("normal craft reserves used and tool selections before consumed defaults", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    const splitRepairStart = source.indexOf("private repairSplitSelection(");
+    const splitRepairEnd = source.indexOf("private normalizeNormalSelectionsForRender", splitRepairStart);
+    const splitRepairSource = source.slice(splitRepairStart, splitRepairEnd);
+    assert.ok(splitRepairSource.indexOf("const repairedUsed = this.supplementSelectedItems(used, candidates, usedCount);")
+        < splitRepairSource.indexOf("const consumedCandidates = candidates.filter(item => {"));
+    assert.match(splitRepairSource, /return itemId === undefined \|\| !repairedUsedIds\.has\(itemId\);/);
+    assert.match(splitRepairSource, /const repairedConsumed = this\.supplementSelectedItems\(consumed, consumedCandidates, consumedCount\);/);
+
+    const normalizeStart = source.indexOf("private normalizeNormalSelectionsForRender(): void {");
+    const normalizeEnd = source.indexOf("private reportSelectionUnavailable", normalizeStart);
+    const normalizeSource = source.slice(normalizeStart, normalizeEnd);
+    assert.ok(normalizeSource.indexOf('repairRole(i, "used", "used"')
+        < normalizeSource.indexOf('repairRole(i, "consumed", "consumed"'));
+    assert.ok(normalizeSource.indexOf('repairRole(i, "tool", "tool"')
+        < normalizeSource.indexOf('repairRole(i, "consumed", "consumed"'));
+});
+
+test("normal section counters render from current selected counts", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    assert.match(source, /private getSelectedCountForSection\(slotIndex: number, semantic: SectionSemantic\): number \{/);
+    assert.match(source, /counter\.setText\(TranslationImpl\.generator\(`\$\{this\.getSelectedCountForSection\(-1, "base"\)\}\/1`\)\);/);
+    assert.match(source, /counter\.setText\(TranslationImpl\.generator\(`\$\{this\.getSelectedCountForSection\(index, semantic\)\}\/\$\{maxSelect\}`\)\);/);
+    assert.match(source, /const count = this\.getSelectedCountForSection\(slotIndex, semantic\);/);
+});
+
 test("bulk and dismantle reserve nonconsumed selections before consumed targets", async () => {
     const dialogSource = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
     const runtimeSource = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");

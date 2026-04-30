@@ -2527,21 +2527,15 @@ export default class BetterCraftingPanel extends Component {
             }
             : this.getSplitSelection(slotIndex);
 
-        const consumed = this.sanitizeSelectedItems(current.consumed, candidates, consumedCount);
-        const consumedIds = new Set(consumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
-        const usedCandidates = candidates.filter(item => {
+        const used = this.sanitizeSelectedItems(current.used, candidates, usedCount);
+        const repairedUsed = this.supplementSelectedItems(used, candidates, usedCount);
+        const repairedUsedIds = new Set(repairedUsed.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
+        const consumedCandidates = candidates.filter(item => {
             const itemId = getItemId(item);
-            return itemId === undefined || !consumedIds.has(itemId);
+            return itemId === undefined || !repairedUsedIds.has(itemId);
         });
-        const used = this.sanitizeSelectedItems(current.used, usedCandidates, usedCount);
-
-        const repairedConsumed = this.supplementSelectedItems(consumed, candidates, consumedCount);
-        const repairedConsumedIds = new Set(repairedConsumed.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
-        const repairedUsedCandidates = candidates.filter(item => {
-            const itemId = getItemId(item);
-            return itemId === undefined || !repairedConsumedIds.has(itemId);
-        });
-        const repairedUsed = this.supplementSelectedItems(used, repairedUsedCandidates, usedCount);
+        const consumed = this.sanitizeSelectedItems(current.consumed, consumedCandidates, consumedCount);
+        const repairedConsumed = this.supplementSelectedItems(consumed, consumedCandidates, consumedCount);
 
         return {
             consumed: repairedConsumed,
@@ -2579,22 +2573,6 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < this.recipe.components.length; i++) {
             const component = this.recipe.components[i];
-            if (component.consumedAmount <= 0) continue;
-
-            const candidates = this.getFilteredSortedSectionItems("normal", i, "consumed", this.findMatchingItems(component.type));
-            if (this.isSplitComponent(component)) {
-                const splitSelection = this.getSplitSelection(i);
-                const consumed = repairRole(i, "consumed", "consumed", splitSelection.consumed, candidates, getConsumedSelectionCount(component.requiredAmount, component.consumedAmount));
-                this.setSplitSelection(i, consumed, splitSelection.used);
-                continue;
-            }
-
-            this.clearSplitSelection(i);
-            this.selectedItems.set(i, repairRole(i, "consumed", "consumed", this.selectedItems.get(i) ?? [], candidates, component.requiredAmount));
-        }
-
-        for (let i = 0; i < this.recipe.components.length; i++) {
-            const component = this.recipe.components[i];
             if (!this.isSplitComponent(component)) continue;
 
             const splitSelection = this.getSplitSelection(i);
@@ -2610,6 +2588,22 @@ export default class BetterCraftingPanel extends Component {
             const candidates = this.getFilteredSortedSectionItems("normal", i, "tool", this.findMatchingItems(component.type));
             this.clearSplitSelection(i);
             this.selectedItems.set(i, repairRole(i, "tool", "tool", this.selectedItems.get(i) ?? [], candidates, component.requiredAmount));
+        }
+
+        for (let i = 0; i < this.recipe.components.length; i++) {
+            const component = this.recipe.components[i];
+            if (component.consumedAmount <= 0) continue;
+
+            const candidates = this.getFilteredSortedSectionItems("normal", i, "consumed", this.findMatchingItems(component.type));
+            if (this.isSplitComponent(component)) {
+                const splitSelection = this.getSplitSelection(i);
+                const consumed = repairRole(i, "consumed", "consumed", splitSelection.consumed, candidates, getConsumedSelectionCount(component.requiredAmount, component.consumedAmount));
+                this.setSplitSelection(i, consumed, splitSelection.used);
+                continue;
+            }
+
+            this.clearSplitSelection(i);
+            this.selectedItems.set(i, repairRole(i, "consumed", "consumed", this.selectedItems.get(i) ?? [], candidates, component.requiredAmount));
         }
     }
 
@@ -2727,15 +2721,21 @@ export default class BetterCraftingPanel extends Component {
 
     // ── Counter updates ───────────────────────────────────────────────────────
 
+    private getSelectedCountForSection(slotIndex: number, semantic: SectionSemantic): number {
+        if (semantic === "consumed") {
+            return this.getSplitSelection(slotIndex).consumed.length;
+        }
+        if (semantic === "used") {
+            return this.getSplitSelection(slotIndex).used.length;
+        }
+
+        return (this.selectedItems.get(slotIndex) || []).length;
+    }
+
     private updateCounter(slotIndex: number, maxSelect: number, semantic: SectionSemantic = "base") {
         const counter = this.sectionCounters.get(getSectionCounterKey(slotIndex, semantic));
         if (!counter) return;
-        let count = (this.selectedItems.get(slotIndex) || []).length;
-        if (semantic === "consumed") {
-            count = this.getSplitSelection(slotIndex).consumed.length;
-        } else if (semantic === "used") {
-            count = this.getSplitSelection(slotIndex).used.length;
-        }
+        const count = this.getSelectedCountForSection(slotIndex, semantic);
         counter.setText(TranslationImpl.generator(`${count}/${maxSelect}`));
         counter.style.set("color", count >= maxSelect ? "#33ff99" : "#c8bc8a");
         this.updateCraftButtonState();
@@ -2900,7 +2900,7 @@ export default class BetterCraftingPanel extends Component {
         this.appendSectionHeader(labelRow, `Base: ${this.getTypeName(baseType)}`, this.formatAvailableCount(visibleItems.length, items.length), "base");
 
         const counter = new Text();
-        counter.setText(TranslationImpl.generator("0/1"));
+        counter.setText(TranslationImpl.generator(`${this.getSelectedCountForSection(-1, "base")}/1`));
         counter.style.set("color", "#c8bc8a");
         counter.style.set("font-size", "0.9em");
         counter.style.set("margin-left", "8px");
@@ -2937,7 +2937,7 @@ export default class BetterCraftingPanel extends Component {
         this.appendSectionHeader(labelRow, `${this.getTypeName(component.type)} ×${maxSelect}`, this.formatAvailableCount(visibleItems.length, totalAvailableCount), semantic);
 
         const counter = new Text();
-        counter.setText(TranslationImpl.generator(`0/${maxSelect}`));
+        counter.setText(TranslationImpl.generator(`${this.getSelectedCountForSection(index, semantic)}/${maxSelect}`));
         counter.style.set("color", "#c8bc8a");
         counter.style.set("font-size", "0.9em");
         counter.style.set("margin-left", "8px");
