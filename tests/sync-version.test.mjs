@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { syncModVersion } from "../scripts/sync-version.mjs";
 
@@ -10,7 +11,7 @@ async function writeWorkspace(rootDir, packageJson, modJson) {
 }
 
 test("syncModVersion updates mod.json when package.json version differs", async () => {
-    const rootDir = await mkdtemp(path.join("/tmp", "better-crafting-sync-version-"));
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "better-crafting-sync-version-"));
     await writeWorkspace(
         rootDir,
         { name: "Better Crafting", version: "1.7.1" },
@@ -28,7 +29,7 @@ test("syncModVersion updates mod.json when package.json version differs", async 
 });
 
 test("syncModVersion leaves mod.json unchanged when already synced", async () => {
-    const rootDir = await mkdtemp(path.join("/tmp", "better-crafting-sync-version-"));
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "better-crafting-sync-version-"));
     await writeWorkspace(
         rootDir,
         { name: "Better Crafting", version: "1.7.0" },
@@ -46,7 +47,7 @@ test("syncModVersion leaves mod.json unchanged when already synced", async () =>
 });
 
 test("syncModVersion fails when package.json version is missing", async () => {
-    const rootDir = await mkdtemp(path.join("/tmp", "better-crafting-sync-version-"));
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "better-crafting-sync-version-"));
     await writeWorkspace(
         rootDir,
         { name: "Better Crafting" },

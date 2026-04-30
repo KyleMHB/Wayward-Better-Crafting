@@ -1,5 +1,5 @@
 import Mod from '@wayward/game/mod/Mod';
-import BetterCraftingPanel, { STAMINA_COST_PER_LEVEL } from './src/BetterCraftingDialog';
+import BetterCraftingPanel from './src/BetterCraftingDialog';
 import { EventHandler } from "@wayward/game/event/EventManager";
 import { EventBus } from "@wayward/game/event/EventBuses";
 import { ActionType } from "@wayward/game/game/entity/action/IAction";
@@ -11,7 +11,7 @@ import Craft from "@wayward/game/game/entity/action/actions/Craft";
 import Dismantle from "@wayward/game/game/entity/action/actions/Dismantle";
 import type Item from "@wayward/game/game/item/Item";
 import ItemManager from "@wayward/game/game/item/ItemManager";
-import { ItemType, ItemTypeGroup, RecipeLevel } from "@wayward/game/game/item/IItem";
+import { ItemType, ItemTypeGroup } from "@wayward/game/game/item/IItem";
 import { itemDescriptions } from "@wayward/game/game/item/ItemDescriptions";
 import { Stat } from "@wayward/game/game/entity/IStats";
 import type { IStat } from "@wayward/game/game/entity/IStats";
@@ -33,6 +33,7 @@ import {
     isSplitConsumption,
     partitionSelectedItems,
 } from "./src/craftingSelection";
+import { getCraftStaminaCost } from "./src/craftStamina";
 import { getItemIdSafe, getItemIds } from "./src/itemIdentity";
 import type {
     IBetterCraftingRequestStatus,
@@ -47,18 +48,21 @@ import type {
 
 type ActivationMode = "holdHotkeyToBypass" | "holdHotkeyToAccess";
 type ActivationHotkey = "Shift" | "Control" | "Alt";
+type CloseHotkey = string;
 
 interface IBetterCraftingGlobalData {
     activationMode: ActivationMode;
     activationHotkey: ActivationHotkey;
-    unsafeBulkCrafting: boolean;
+    closeHotkey: CloseHotkey;
+    safeCrafting: boolean;
     debugLogging: boolean;
 }
 
 const DEFAULT_SETTINGS: Readonly<IBetterCraftingGlobalData> = {
     activationMode: "holdHotkeyToBypass",
     activationHotkey: "Shift",
-    unsafeBulkCrafting: false,
+    closeHotkey: "c",
+    safeCrafting: true,
     debugLogging: false,
 };
 
@@ -176,6 +180,20 @@ function getItemId(item: Item | undefined): number | undefined {
 
 function getQualitySortKey(item: Item): number {
     return (item.quality ?? 0) as number;
+}
+
+function getCurrentStamina(): number {
+    return localPlayer ? (localPlayer as any).stat?.get?.(Stat.Stamina)?.value ?? 0 : 0;
+}
+
+function normalizeCloseHotkey(value: unknown): CloseHotkey | undefined {
+    if (typeof value !== "string") return undefined;
+
+    const normalized = value.trim();
+    if (/^[a-z]$/i.test(normalized)) return normalized.toLowerCase();
+    if (normalized === "Escape") return normalized;
+
+    return undefined;
 }
 
 class BetterCraftingStatusPacket extends ClientPacket<void> {
@@ -397,7 +415,6 @@ export default class BetterCrafting extends Mod {
     public bypassIntercept = false;
     private shiftHeld = false;
     private isBulkCrafting = false;
-    private legacyUnsafeCraftingSeed = false;
     private bulkAbortController: {
         aborted: boolean;
         reason: string;
@@ -415,10 +432,7 @@ export default class BetterCrafting extends Mod {
     // ── Mod lifecycle ─────────────────────────────────────────────────────────
 
     public override initializeGlobalData(data: unknown): IBetterCraftingGlobalData {
-        const normalized = this.normalizeSettings(data);
-        this.legacyUnsafeCraftingSeed = normalized.unsafeBulkCrafting;
-        normalized.unsafeBulkCrafting = false;
-        return normalized;
+        return this.normalizeSettings(data);
     }
 
     public override onInitialize(): void {
@@ -478,6 +492,33 @@ export default class BetterCrafting extends Mod {
             hotkeyChoices.setRefreshMethod(() => hotkeyChoices.get(this.settings.activationHotkey)!);
             hotkeyChoices.refresh();
             container.appendChild(hotkeyChoices.element);
+
+            const closeHotkeyLabel = document.createElement("div");
+            closeHotkeyLabel.textContent = "Close UI Hotkey";
+            closeHotkeyLabel.style.marginTop = "12px";
+            closeHotkeyLabel.style.marginBottom = "6px";
+            container.appendChild(closeHotkeyLabel);
+
+            const closeHotkeyChoices = new ChoiceList<Choice<CloseHotkey>>();
+            const closeHotkeyValues: CloseHotkey[] = [
+                "c", "x", "z", "q", "e", "r", "f", "g", "v", "b",
+                "n", "m", "t", "y", "h", "j", "k", "l", "Escape",
+            ];
+            const closeHotkeyChoiceById = new Map<CloseHotkey, Choice<CloseHotkey>>();
+            const closeHotkeyChoicesList = closeHotkeyValues.map(closeHotkey => {
+                const choice = new Choice<CloseHotkey>(closeHotkey);
+                choice.setText(TranslationImpl.generator(closeHotkey === "Escape" ? "Escape" : closeHotkey.toUpperCase()));
+                closeHotkeyChoiceById.set(closeHotkey, choice);
+                return choice;
+            });
+            closeHotkeyChoices.setChoices(...closeHotkeyChoicesList);
+            closeHotkeyChoices.event.subscribe("choose", (_: unknown, choice?: Choice<CloseHotkey>) => {
+                if (!choice) return;
+                this.globalData.closeHotkey = choice.id;
+            });
+            closeHotkeyChoices.setRefreshMethod(() => closeHotkeyChoiceById.get(this.settings.closeHotkey) ?? closeHotkeyChoiceById.get(DEFAULT_SETTINGS.closeHotkey)!);
+            closeHotkeyChoices.refresh();
+            container.appendChild(closeHotkeyChoices.element);
 
             const diagnosticsLabel = document.createElement("div");
             diagnosticsLabel.textContent = "Diagnostics";
@@ -554,9 +595,12 @@ export default class BetterCrafting extends Mod {
             activationHotkey: source.activationHotkey === "Shift" || source.activationHotkey === "Control" || source.activationHotkey === "Alt"
                 ? source.activationHotkey
                 : DEFAULT_SETTINGS.activationHotkey,
-            unsafeBulkCrafting: typeof source.unsafeBulkCrafting === "boolean"
-                ? source.unsafeBulkCrafting
-                : DEFAULT_SETTINGS.unsafeBulkCrafting,
+            closeHotkey: normalizeCloseHotkey(source.closeHotkey) ?? DEFAULT_SETTINGS.closeHotkey,
+            safeCrafting: typeof source.safeCrafting === "boolean"
+                ? source.safeCrafting
+                : typeof (source as { unsafeBulkCrafting?: unknown }).unsafeBulkCrafting === "boolean"
+                    ? !(source as { unsafeBulkCrafting: boolean }).unsafeBulkCrafting
+                    : DEFAULT_SETTINGS.safeCrafting,
             debugLogging: typeof source.debugLogging === "boolean"
                 ? source.debugLogging
                 : DEFAULT_SETTINGS.debugLogging,
@@ -586,13 +630,51 @@ export default class BetterCrafting extends Mod {
 
     private shouldAbortForHealthLoss(stat: IStat, oldValue: number): boolean {
         if (stat.type !== Stat.Health || (stat.value ?? 0) >= oldValue) return false;
-        if (this.panel?.isUnsafeCraftingEnabled()) return false;
+        if (!this.panel?.isSafeCraftingEnabled()) return false;
 
         return true;
     }
 
     private getItemId(item: Item | undefined): number | undefined {
         return getItemIdSafe(item);
+    }
+
+    private getCraftReusableItems(itemType: ItemType, requiredItems: readonly Item[] | undefined): Item[] {
+        if (!requiredItems?.length) return [];
+
+        const recipe = itemDescriptions[itemType]?.recipe;
+        if (!recipe) return [];
+
+        const reusable: Item[] = [];
+        let requiredIndex = 0;
+
+        for (const component of recipe.components) {
+            const selectedItems = requiredItems.slice(requiredIndex, requiredIndex + component.requiredAmount);
+            requiredIndex += component.requiredAmount;
+            if (selectedItems.length < component.requiredAmount) break;
+            if (!isSplitConsumption(component.requiredAmount, component.consumedAmount)) continue;
+
+            reusable.push(...selectedItems.slice(getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)));
+        }
+
+        return reusable;
+    }
+
+    private applyCraftReusableDurability(itemType: ItemType, requiredItems: readonly Item[] | undefined): void {
+        const reusableItems = this.getCraftReusableItems(itemType, requiredItems);
+        if (reusableItems.length === 0) return;
+
+        for (const item of reusableItems) {
+            const durabilityLoss = Math.max(0, item.getDamageModifier?.() ?? 0);
+            if (durabilityLoss <= 0) continue;
+            if ((item as any).isValid === false) continue;
+            item.damage("betterCraftingSplitUse", durabilityLoss);
+        }
+
+        this.debugLog("Applied reusable craft durability.", {
+            itemType,
+            reusableIds: getItemIds(reusableItems, item => this.getItemId(item)),
+        });
     }
 
     private get debugLoggingEnabled(): boolean {
@@ -619,12 +701,6 @@ export default class BetterCrafting extends Mod {
     private onBlur = () => {
         this.clearHeldHotkeyState();
     };
-
-    private consumeLegacyUnsafeCraftingSeed(): boolean {
-        const seed = this.legacyUnsafeCraftingSeed;
-        this.legacyUnsafeCraftingSeed = false;
-        return seed;
-    }
 
     private isRemoteMultiplayerClient(): boolean {
         return multiplayer?.isConnected === true && multiplayer.isClient;
@@ -1201,7 +1277,7 @@ export default class BetterCrafting extends Mod {
                         await this.executeDismantle(items, requiredItem);
                     },
                     () => this.settings,
-                    this.consumeLegacyUnsafeCraftingSeed(),
+                    this.settings.safeCrafting,
                 );
                 this.panel.setPanelHideCallback(() => {
                     this.clearPendingApprovals();
@@ -1598,6 +1674,12 @@ export default class BetterCrafting extends Mod {
         consumed: Item[] | undefined,
         base: Item | undefined,
     ): Promise<void> {
+        const recipe = itemDescriptions[itemType]?.recipe;
+        if (!recipe) return;
+
+        const staminaCost = getCraftStaminaCost(recipe.level);
+        if (this.panel?.isSafeCraftingEnabled() && getCurrentStamina() < staminaCost) return;
+
         if (this.isRemoteMultiplayerClient()) {
             const { promise } = this.requestApproval(requestId => {
                 const request = this.panel?.serializeCraftSelectionRequest(requestId);
@@ -1611,6 +1693,8 @@ export default class BetterCrafting extends Mod {
             const approved = await promise;
             if (!approved) return;
         }
+
+        if (this.panel?.isSafeCraftingEnabled() && getCurrentStamina() < staminaCost) return;
 
         this.bypassIntercept = true;
         try {
@@ -1717,7 +1801,17 @@ export default class BetterCrafting extends Mod {
         }
     }
 
-    private canUseForDismantle(requiredItem?: Item): boolean {
+    private getRemainingDurabilityUses(requiredItem: Item, perUseLoss: number, leaveOneUse: boolean): number {
+        if (perUseLoss <= 0) return Number.MAX_SAFE_INTEGER;
+
+        const durability = requiredItem.durability ?? 0;
+        if (durability <= 0) return 0;
+
+        const usableActions = Math.ceil(durability / perUseLoss);
+        return Math.max(0, usableActions - (leaveOneUse ? 1 : 0));
+    }
+
+    private canUseForDismantle(requiredItem?: Item, leaveOneUse = false): boolean {
         if (!requiredItem) return true;
 
         const perUseLoss = Math.max(
@@ -1728,7 +1822,7 @@ export default class BetterCrafting extends Mod {
         );
 
         if (perUseLoss <= 0) return true;
-        return (requiredItem.durability ?? 0) >= perUseLoss;
+        return this.getRemainingDurabilityUses(requiredItem, perUseLoss, leaveOneUse) > 0;
     }
 
     /**
@@ -1794,7 +1888,7 @@ export default class BetterCrafting extends Mod {
         const recipe = itemDescriptions[itemType]?.recipe;
         if (!recipe) return;
 
-        const staminaCost = STAMINA_COST_PER_LEVEL[recipe.level as RecipeLevel] ?? 4;
+        const staminaCost = getCraftStaminaCost(recipe.level);
 
         // Set up abort controller and interrupt hooks.
         this.bulkAbortController = { aborted: false, reason: "", resolveWait: null };
@@ -1828,9 +1922,7 @@ export default class BetterCrafting extends Mod {
                 if (!localPlayer?.island) break;
 
                 // Stamina pre-check.
-                const currentStamina: number =
-                    (localPlayer as any).stat?.get?.(Stat.Stamina)?.value ?? 0;
-                if (!this.panel?.isUnsafeCraftingEnabled() && currentStamina < staminaCost) break;
+                if (this.panel?.isSafeCraftingEnabled() && getCurrentStamina() < staminaCost) break;
 
                 // Re-resolve items — prior crafts consume materials.
                 const resolved = this.panel?.resolveForBulkCraft(itemType, excludedIds, sessionConsumedIds);
@@ -1950,10 +2042,13 @@ export default class BetterCrafting extends Mod {
                 if (this.bulkAbortController.aborted) break;
                 if (!localPlayer?.island) break;
 
+                if (this.panel?.isSafeCraftingEnabled() && getCurrentStamina() < 1) break;
+
                 const requiresRequiredItem = this.panel?.requiresDismantleRequiredItem() ?? false;
                 if (requiresRequiredItem) {
                     const resolvedRequiredItem = this.panel?.resolveDismantleRequiredSelection() ?? activeRequiredItem;
-                    if (!resolvedRequiredItem || !this.canUseForDismantle(resolvedRequiredItem)) break;
+                    const preserveDurability = this.panel?.shouldPreserveDismantleRequiredDurability() ?? true;
+                    if (!resolvedRequiredItem || !this.canUseForDismantle(resolvedRequiredItem, preserveDurability)) break;
                     stopAfterCurrent = activeRequiredItem !== undefined && resolvedRequiredItem !== activeRequiredItem;
                     activeRequiredItem = resolvedRequiredItem;
                 } else {
@@ -2329,6 +2424,22 @@ export default class BetterCrafting extends Mod {
             }
             return false;
         }
+    }
+
+    @EventHandler(EventBus.Actions, "postExecuteAction")
+    public onPostExecuteAction(
+        host: any,
+        actionType: ActionType,
+        actionApi: IActionHandlerApi<Entity>,
+        args: any[],
+    ): void {
+        if (actionType !== ActionType.Craft) return;
+
+        const itemType = args[0] as ItemType | undefined;
+        const requiredItems = Array.isArray(args[1]) ? args[1] as Item[] : undefined;
+        if (itemType === undefined || !requiredItems?.length) return;
+
+        this.applyCraftReusableDurability(itemType, requiredItems);
     }
 }
 

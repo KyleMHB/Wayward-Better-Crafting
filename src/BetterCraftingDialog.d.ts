@@ -1,5 +1,5 @@
 import Component from "@wayward/game/ui/component/Component";
-import { ItemType, RecipeLevel } from "@wayward/game/game/item/IItem";
+import { ItemType } from "@wayward/game/game/item/IItem";
 import type Item from "@wayward/game/game/item/Item";
 import type { IBulkCraftRequest, ICraftSelectionRequest, IDismantleRequest } from "./multiplayer/BetterCraftingProtocol";
 type CraftCallback = (itemType: ItemType, required: Item[] | undefined, consumed: Item[] | undefined, base: Item | undefined) => Promise<void>;
@@ -8,7 +8,8 @@ type DismantleCallback = (items: Item[], requiredItem?: Item) => Promise<void>;
 export interface IBetterCraftingSettings {
     activationMode: "holdHotkeyToBypass" | "holdHotkeyToAccess";
     activationHotkey: "Shift" | "Control" | "Alt";
-    unsafeBulkCrafting: boolean;
+    closeHotkey: string;
+    safeCrafting: boolean;
     debugLogging: boolean;
 }
 type SettingsAccessor = () => IBetterCraftingSettings;
@@ -28,7 +29,7 @@ interface ICraftExecutionDiagnostics {
         splitUsedIds?: number[];
     }>;
 }
-export declare const STAMINA_COST_PER_LEVEL: Partial<Record<RecipeLevel, number>>;
+export { DEFAULT_CRAFT_STAMINA_COST, STAMINA_COST_PER_LEVEL } from "./craftStamina";
 export default class BetterCraftingPanel extends Component {
     itemType: number;
     private panelMode;
@@ -50,6 +51,8 @@ export default class BetterCraftingPanel extends Component {
     private selectedItems;
     private splitSelectedItems;
     private sectionCounters;
+    private sectionFilterStates;
+    private pendingSectionReselectKeys;
     private _pendingSelectionIds;
     private _pendingSplitSelectionIds;
     private bcTooltipEl;
@@ -79,8 +82,8 @@ export default class BetterCraftingPanel extends Component {
     private bulkQtyInputEl;
     private bulkMaxLabel;
     private bulkCraftBtnEl;
-    private bulkUnsafeToggleEl;
-    private bulkUnsafeToggleWrap;
+    private bulkSafeToggleEl;
+    private bulkSafeToggleWrap;
     private bulkScrollContent;
     private _bulkContentDirty;
     private bulkStopBtn;
@@ -89,7 +92,7 @@ export default class BetterCraftingPanel extends Component {
     private onBulkAbortCallback;
     private onPanelHideCallback;
     private bulkProgressVerb;
-    private unsafeCraftingEnabled;
+    private safeCraftingEnabled;
     private lastBulkResolutionMessage?;
     private destroyed;
     private dismantleExcludedIds;
@@ -98,23 +101,29 @@ export default class BetterCraftingPanel extends Component {
     private preserveDismantleRequiredDurability;
     private helpBoxExpanded;
     private get activationHotkey();
+    private get closeHotkey();
     private get debugLoggingEnabled();
-    isUnsafeCraftingEnabled(): boolean;
+    private getCurrentStamina;
+    isSafeCraftingEnabled(): boolean;
+    shouldPreserveDismantleRequiredDurability(): boolean;
     showMultiplayerMessage(message: string): void;
     private debugLog;
     consumeLastBulkResolutionMessage(): string | undefined;
-    private setUnsafeCraftingEnabled;
-    private resetUnsafeCraftingEnabled;
+    private setSafeCraftingEnabled;
+    private resetSafeCraftingEnabled;
     private getPanelScale;
     private anchorPanelToViewport;
     private getMinDimensionPx;
     private beginResize;
     private isConfiguredHotkey;
+    private isConfiguredCloseHotkey;
+    private isTypingInEditableControl;
     private updateActivationHotkeyState;
     private readonly _onShiftDown;
     private readonly _onShiftUp;
     private readonly _onBlur;
-    constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback, onDismantle: DismantleCallback, getSettings: SettingsAccessor, initialUnsafeCrafting?: boolean);
+    private bindTooltipRowHandlers;
+    constructor(onCraft: CraftCallback, onBulkCraft: BulkCraftCallback, onDismantle: DismantleCallback, getSettings: SettingsAccessor, initialSafeCrafting?: boolean);
     destroyListeners(): void;
     private canAccessElements;
     private _subscribeInventoryWatch;
@@ -159,6 +168,8 @@ export default class BetterCraftingPanel extends Component {
     refreshVisibleCraftingViews(preserveScroll?: boolean): void;
     private rebuildNormalContent;
     private restoreScrollPosition;
+    private getItemsByOrderedIds;
+    private mergeVisibleSplitCandidates;
     private getPreSelectedItems;
     private isSplitComponent;
     private getSplitSelection;
@@ -184,6 +195,7 @@ export default class BetterCraftingPanel extends Component {
     private createLabelRow;
     private createItemsContainer;
     private makeFullWidthWrapper;
+    private createSafeToggle;
     private appendMissing;
     private addItemRow;
     private addSplitItemRow;
@@ -197,6 +209,7 @@ export default class BetterCraftingPanel extends Component {
     private appendBulkDurabilityControls;
     private appendDismantleDurabilityControls;
     private getMaxUsesText;
+    private appendRemainingUsesHint;
     private addDismantleTargetRow;
     private createSelectionRow;
     private applySelectionRowState;
@@ -220,8 +233,11 @@ export default class BetterCraftingPanel extends Component {
     private prepareBulkPinnedSelections;
     private computeBulkLimits;
     private computeBulkMax;
+    private computeDismantleStaminaMax;
     private computeDismantleMax;
     private hasDismantleDurabilityLimit;
+    private hasDismantleStaminaLimit;
+    private isReservedDismantleRequiredItem;
     private getIncludedDismantleItems;
     private updateBulkMaxDisplay;
     private adjustBulkQty;
@@ -248,10 +264,17 @@ export default class BetterCraftingPanel extends Component {
     private createInfoIcon;
     private bcAppendTooltipContent;
     private bcTooltipDivider;
+    private getSectionStateKey;
+    private getSectionFilterState;
+    private shouldReselectSection;
+    private clearSectionReselect;
+    private getItemDisplayName;
+    private getFilteredSortedSectionItems;
+    private formatAvailableCount;
+    private appendSectionControls;
     private getTypeName;
     private findMatchingItems;
     private crafting;
     private onCraft;
     private showValidationError;
 }
-export {};

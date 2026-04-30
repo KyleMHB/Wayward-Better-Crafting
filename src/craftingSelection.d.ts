@@ -1,10 +1,12 @@
 export interface IPartitionedSelection<T> {
     required: T[];
     consumed: T[];
+    used: T[];
 }
 export interface ICraftExecutionPayload<T> {
     required: T[];
     consumed: T[];
+    used: T[];
 }
 export declare function isSplitConsumption(requiredAmount: number, consumedAmount: number): boolean;
 export declare function filterSelectableItems<T>(items: readonly T[], getId: (item: T) => number | undefined): T[];

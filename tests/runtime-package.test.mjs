@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { collectWhitelistedRuntimeFiles } from "../scripts/runtime-package.mjs";
 
 test("collectWhitelistedRuntimeFiles includes runtime assets and skips non-runtime files", async () => {
-    const rootDir = await mkdtemp(path.join("/tmp", "better-crafting-runtime-"));
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "better-crafting-runtime-"));
 
     await mkdir(path.join(rootDir, "src"), { recursive: true });
     await writeFile(path.join(rootDir, "mod.json"), "{}");
@@ -17,7 +18,7 @@ test("collectWhitelistedRuntimeFiles includes runtime assets and skips non-runti
 
     const runtimeFiles = await collectWhitelistedRuntimeFiles(rootDir, "betterCrafting.js");
 
-    assert.deepEqual(runtimeFiles, [
+    assert.deepEqual(runtimeFiles.map(file => file.replaceAll("\\", "/")), [
         "betterCrafting.js",
         "mod.json",
         "mod.png",

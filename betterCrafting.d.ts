@@ -7,10 +7,12 @@ import { ItemType } from "@wayward/game/game/item/IItem";
 import type { IBetterCraftingRequestStatus, IBulkActionAbortRequest, IBulkCraftRequest, ICraftApprovalResponse, ICraftSelectionRequest, IDismantleRequest } from "./src/multiplayer/BetterCraftingProtocol";
 type ActivationMode = "holdHotkeyToBypass" | "holdHotkeyToAccess";
 type ActivationHotkey = "Shift" | "Control" | "Alt";
+type CloseHotkey = string;
 interface IBetterCraftingGlobalData {
     activationMode: ActivationMode;
     activationHotkey: ActivationHotkey;
-    unsafeBulkCrafting: boolean;
+    closeHotkey: CloseHotkey;
+    safeCrafting: boolean;
     debugLogging: boolean;
 }
 interface IVanillaCraftBypassPermitRequest {
@@ -27,7 +29,6 @@ export default class BetterCrafting extends Mod {
     bypassIntercept: boolean;
     private shiftHeld;
     private isBulkCrafting;
-    private legacyUnsafeCraftingSeed;
     private bulkAbortController;
     private nextMultiplayerRequestId;
     private readonly pendingApprovals;
@@ -46,12 +47,13 @@ export default class BetterCrafting extends Mod {
     private shouldOpenBetterCrafting;
     private shouldAbortForHealthLoss;
     private getItemId;
+    private getCraftReusableItems;
+    private applyCraftReusableDurability;
     private get debugLoggingEnabled();
     private debugLog;
     private onKeyDown;
     private onKeyUp;
     private onBlur;
-    private consumeLegacyUnsafeCraftingSeed;
     private isRemoteMultiplayerClient;
     private showMultiplayerMessage;
     private clearPendingApprovals;
@@ -91,6 +93,7 @@ export default class BetterCrafting extends Mod {
     private waitForTurnEnd;
     private waitForActionDelayClear;
     private abortBulkCraft;
+    private getRemainingDurabilityUses;
     private canUseForDismantle;
     private registerBulkInterruptHooks;
     private executeBulkCraft;
@@ -100,5 +103,6 @@ export default class BetterCrafting extends Mod {
     processDismantleRequest(connection: any, request: IDismantleRequest): void;
     private isVanillaBypassCraftRequested;
     onPreExecuteAction(host: any, actionType: ActionType, actionApi: IActionHandlerApi<Entity>, args: any[]): false | void;
+    onPostExecuteAction(host: any, actionType: ActionType, actionApi: IActionHandlerApi<Entity>, args: any[]): void;
 }
 export {};

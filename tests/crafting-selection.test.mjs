@@ -46,6 +46,7 @@ test("partitionSelectedItems only consumes the consumed subset for partial-consu
 
     assert.deepEqual(partitioned.required, items.slice(0, 2));
     assert.deepEqual(partitioned.consumed, items.slice(0, 1));
+    assert.deepEqual(partitioned.used, items.slice(1, 2));
 });
 
 test("buildCraftExecutionPayload preserves consumed-first ordering across slots", async () => {
@@ -65,6 +66,7 @@ test("buildCraftExecutionPayload preserves consumed-first ordering across slots"
 
     assert.equal(JSON.stringify(payload.required), JSON.stringify([{ id: 1 }, { id: 2 }, { id: 3 }]));
     assert.equal(JSON.stringify(payload.consumed), JSON.stringify([{ id: 1 }]));
+    assert.equal(JSON.stringify(payload.used), JSON.stringify([{ id: 2 }, { id: 3 }]));
 });
 
 test("split-consumption helpers report the consumed and used counts separately", async () => {

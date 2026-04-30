@@ -1,11 +1,13 @@
 export interface IPartitionedSelection<T> {
     required: T[];
     consumed: T[];
+    used: T[];
 }
 
 export interface ICraftExecutionPayload<T> {
     required: T[];
     consumed: T[];
+    used: T[];
 }
 
 export function isSplitConsumption(requiredAmount: number, consumedAmount: number): boolean {
@@ -47,6 +49,7 @@ export function partitionSelectedItems<T>(
     return {
         required,
         consumed: required.slice(0, consumedCount),
+        used: required.slice(consumedCount),
     };
 }
 
@@ -56,6 +59,7 @@ export function buildCraftExecutionPayload<T>(
 ): ICraftExecutionPayload<T> {
     const required: T[] = [];
     const consumed: T[] = [];
+    const used: T[] = [];
 
     let slotIndex = 0;
     for (const selection of selections) {
@@ -63,11 +67,13 @@ export function buildCraftExecutionPayload<T>(
         const partitioned = partitionSelectedItems(selection, requiredAmount, consumedAmount);
         required.push(...partitioned.required);
         consumed.push(...partitioned.consumed);
+        used.push(...partitioned.used);
         slotIndex++;
     }
 
     return {
         required: [...required],
         consumed: [...consumed],
+        used: [...used],
     };
 }
