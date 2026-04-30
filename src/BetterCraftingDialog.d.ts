@@ -50,6 +50,7 @@ export default class BetterCraftingPanel extends Component {
     private validationMsg?;
     private selectedItems;
     private splitSelectedItems;
+    private normalRenderReservations;
     private sectionCounters;
     private sectionFilterStates;
     private pendingSectionReselectKeys;
@@ -136,6 +137,12 @@ export default class BetterCraftingPanel extends Component {
     resolveDismantleRequiredSelection(): Item | undefined;
     private showSelectionChangedError;
     private sanitizeSelectedItems;
+    private getReservationRoleLabel;
+    private reserveItemsForRole;
+    private getReservationConflict;
+    private filterUnreservedItems;
+    private hasDuplicateItemIds;
+    private hasDuplicateIds;
     private supplementSelectedItems;
     private getSelectionFailureMessage;
     private setBulkResolutionFailure;
@@ -223,6 +230,8 @@ export default class BetterCraftingPanel extends Component {
     private addBulkComponentSection;
     private getBulkToolSelection;
     private getBulkUsedSelection;
+    private getBulkReservedNonconsumedIds;
+    private getBulkReservedNonconsumedRole;
     private addBulkItemRow;
     private addBulkUsedRow;
     private addBulkToolRow;
@@ -238,6 +247,7 @@ export default class BetterCraftingPanel extends Component {
     private hasDismantleDurabilityLimit;
     private hasDismantleStaminaLimit;
     private isReservedDismantleRequiredItem;
+    private isIncludedDismantleTargetItem;
     private getIncludedDismantleItems;
     private updateBulkMaxDisplay;
     private adjustBulkQty;

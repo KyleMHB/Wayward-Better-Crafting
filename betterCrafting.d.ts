@@ -43,6 +43,7 @@ export default class BetterCrafting extends Mod {
     private normalizeSettings;
     private clearHeldHotkeyState;
     private isConfiguredHotkey;
+    private isTypingInEditableControl;
     private isActivationHotkeyHeld;
     private shouldOpenBetterCrafting;
     private shouldAbortForHealthLoss;

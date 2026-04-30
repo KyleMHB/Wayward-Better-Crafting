@@ -615,12 +615,22 @@ export default class BetterCrafting extends Mod {
         return key === this.settings.activationHotkey;
     }
 
+    private isTypingInEditableControl(target: EventTarget | null = document.activeElement): boolean {
+        const element = target instanceof HTMLElement ? target : undefined;
+        if (!element) return false;
+        if (element.closest("input, textarea, select")) return true;
+
+        const editable = element.closest("[contenteditable]");
+        return editable instanceof HTMLElement && editable.isContentEditable;
+    }
+
     private isActivationHotkeyHeld(): boolean {
         return this.shiftHeld;
     }
 
     private shouldOpenBetterCrafting(): boolean {
         if (this.bypassIntercept) return false;
+        if (this.isTypingInEditableControl()) return false;
         if (this.isRemoteMultiplayerClient()) return true;
 
         return this.settings.activationMode === "holdHotkeyToBypass"
@@ -691,6 +701,7 @@ export default class BetterCrafting extends Mod {
     }
 
     private onKeyDown = (e: KeyboardEvent) => {
+        if (this.isTypingInEditableControl(e.target)) return;
         if (this.isConfiguredHotkey(e.key)) this.shiftHeld = true;
     };
 
@@ -1522,6 +1533,23 @@ export default class BetterCrafting extends Mod {
         const required: Item[] = [];
         const consumed: Item[] = [];
         const nextConsumedIds = new Set<number>(sessionConsumedIds);
+        const preReservedToolSelections = new Map<number, Item[]>();
+
+        for (let i = 0; i < recipe.components.length; i++) {
+            const component = recipe.components[i];
+            if (component.consumedAmount > 0) continue;
+
+            const pinnedToolIds = pinnedToolSelections.get(i) ?? [];
+            if (pinnedToolIds.length === 0) continue;
+
+            const resolvedPinned = this.resolveSelectedItems(player, component.type, pinnedToolIds, reservedIds, {
+                slotIndex: i,
+                failureReason: "pinnedToolUnavailable",
+            });
+            if (resolvedPinned.value && resolvedPinned.value.length >= component.requiredAmount) {
+                preReservedToolSelections.set(i, resolvedPinned.value.slice(0, component.requiredAmount));
+            }
+        }
 
         let base: Item | undefined;
         if (recipe.baseComponent !== undefined) {
@@ -1594,14 +1622,18 @@ export default class BetterCrafting extends Mod {
             }
 
             if (component.consumedAmount <= 0 && pinnedToolIds.length > 0) {
-                const resolvedPinned = this.resolveSelectedItems(player, component.type, pinnedToolIds, reservedIds, {
-                    slotIndex: i,
-                    failureReason: "pinnedToolUnavailable",
-                });
-                if (!resolvedPinned.value || resolvedPinned.value.length < component.requiredAmount) {
-                    return { failure: resolvedPinned.failure };
+                const resolvedPinned = preReservedToolSelections.get(i);
+                if (!resolvedPinned || resolvedPinned.length < component.requiredAmount) {
+                    return {
+                        failure: this.createSelectionFailure("pinnedToolUnavailable", {
+                            slotIndex: i,
+                            itemTypeOrGroup: component.type as number,
+                            requestedItemIds: pinnedToolIds,
+                            candidateItemIds: this.findMatchingItems(player, component.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                        }),
+                    };
                 }
-                required.push(...resolvedPinned.value.slice(0, component.requiredAmount));
+                required.push(...resolvedPinned.slice(0, component.requiredAmount));
                 continue;
             }
 
@@ -1642,6 +1674,8 @@ export default class BetterCrafting extends Mod {
     }
 
     private resolveDismantleTargets(player: Player, request: IDismantleRequest): Item[] | undefined {
+        if (request.requiredItemId !== undefined && request.targetItemIds.includes(request.requiredItemId)) return;
+
         const nearby = this.findMatchingItems(player, request.itemType);
         const byId = new Map<number, Item>();
         for (const item of nearby) {

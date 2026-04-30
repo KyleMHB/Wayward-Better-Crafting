@@ -48,7 +48,7 @@ test("shift-held tooltip handlers are shared with bulk and dismantle row builder
     const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
 
     assert.match(source, /private bindTooltipRowHandlers\(/);
-    assert.match(source, /this\.bindTooltipRowHandlers\(row, item, displayName, !autoExcluded && !isUsedSelection\(\)/);
+    assert.match(source, /this\.bindTooltipRowHandlers\(row, item, displayName, !autoExcluded && !isReservedSelection\(\)/);
     assert.match(source, /this\.bindTooltipRowHandlers\(row, item, displayName, \{/);
     assert.match(source, /this\.bindTooltipRowHandlers\(row, item, displayName\);/);
 });
@@ -182,9 +182,70 @@ test("section filters drive visible item ordering and active reselection", async
     assert.match(source, /private getFilteredSortedSectionItems\(/);
     assert.match(source, /ItemSort\.createSorter\(state\.sort, state\.sortDirection\)/);
     assert.match(source, /private pendingSectionReselectKeys: Set<string> = new Set\(\);/);
-    assert.match(source, /this\.selectedItems\.set\(-1, visibleItems\.slice\(0, 1\)\);/);
-    assert.match(source, /this\.bulkPinnedToolSelections\.set\(slotIndex, this\.getBulkToolSelection\(slotIndex, visibleItems, requiredAmount/);
+    assert.match(source, /this\.selectedItems\.set\(-1, selectableItems\.slice\(0, 1\)\);/);
+    assert.match(source, /this\.bulkPinnedToolSelections\.set\(slotIndex, this\.getBulkToolSelection\(slotIndex, selectableItems, requiredAmount/);
     assert.match(source, /this\.dismantleExcludedIds\.clear\(\);/);
+    assert.match(source, /if \(this\.isTypingInEditableControl\(e\.target\)\) return;/);
+    assert.match(source, /direction\.textContent = "↕";/);
+    assert.doesNotMatch(source, /direction\.textContent = state\.sortDirection === SortDirection\.Descending/);
+});
+
+test("filter inputs do not update mod-level hotkey state", async () => {
+    const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+
+    assert.match(source, /private isTypingInEditableControl\(target: EventTarget \| null = document\.activeElement\): boolean \{/);
+    assert.match(source, /if \(this\.isTypingInEditableControl\(\)\) return false;/);
+    assert.match(source, /private onKeyDown = \(e: KeyboardEvent\) => \{\s+if \(this\.isTypingInEditableControl\(e\.target\)\) return;/);
+});
+
+test("bulk consumed and base sections reserve pinned nonconsumed selections", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    assert.match(source, /private getBulkReservedNonconsumedIds\(\): Set<number> \{/);
+    assert.match(source, /addSelectionIds\(this\.bulkPinnedUsedSelections\);[\s\S]*addSelectionIds\(this\.bulkPinnedToolSelections\);/);
+    assert.match(source, /const isConsumedSide = sectionSemantic === "base" \|\| semantic === "consumed";/);
+
+    const reservedCandidateFilters = source.match(/!reservedNonconsumedIds\.has\(itemId\)/g) ?? [];
+    assert.equal(reservedCandidateFilters.length, 2);
+});
+
+test("bulk nonconsumed selection changes rebuild consumed and base sections", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    assert.match(source, /this\.bulkPinnedUsedSelections\.set\(slotIndex, \[\.\.\.selected\]\);\s*this\.buildBulkContent\(false, true\);/);
+    assert.match(source, /this\.bulkPinnedToolSelections\.set\(slotIndex, selected\);\s*this\.buildBulkContent\(false, true\);/);
+    assert.doesNotMatch(source, /let needsRebuild = false;/);
+});
+
+test("crafting selections reserve duplicate item ids across roles", async () => {
+    const dialogSource = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+    const runtimeSource = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+
+    assert.match(dialogSource, /type SelectionReservationRole = "base" \| "consumed" \| "used" \| "tool" \| "required" \| "target" \| "excluded";/);
+    assert.match(dialogSource, /private normalRenderReservations: Map<number, SelectionReservationRole> = new Map\(\);/);
+    assert.match(dialogSource, /this\.reserveItemsForRole\(this\.normalRenderReservations, this\.selectedItems\.get\(-1\) \?\? \[\], "base"\);/);
+    assert.match(dialogSource, /this\.getReservationRoleLabel\(conflictRole\)/);
+    assert.match(dialogSource, /this\.hasDuplicateIds\(selectedIdsForRequest\)/);
+    assert.match(dialogSource, /this\.getSelectionFailureMessage\(\{ reason: "duplicateSelection" \}\)/);
+
+    assert.match(runtimeSource, /if \(reservedIds\.has\(itemId\)\) \{/);
+    assert.match(runtimeSource, /failure: this\.createSelectionFailure\("duplicateSelection"/);
+});
+
+test("bulk and dismantle reserve nonconsumed selections before consumed targets", async () => {
+    const dialogSource = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+    const runtimeSource = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+
+    assert.match(dialogSource, /const preReservedToolSelections = new Map<number, Item\[\]>\(\);/);
+    assert.match(dialogSource, /preReservedToolSelections\.set\(i, resolvedPinned\);/);
+    assert.match(dialogSource, /const preReserved = preReservedToolSelections\.get\(slotIndex\);/);
+    assert.match(dialogSource, /private isIncludedDismantleTargetItem\(item: Item\): boolean \{/);
+    assert.match(dialogSource, /const lockedByRequired = this\.isReservedDismantleRequiredItem\(item\);/);
+    assert.match(dialogSource, /targetItemIds\.includes\(requiredItemId\)/);
+
+    assert.match(runtimeSource, /const preReservedToolSelections = new Map<number, Item\[\]>\(\);/);
+    assert.match(runtimeSource, /preReservedToolSelections\.set\(i, resolvedPinned\.value\.slice\(0, component\.requiredAmount\)\);/);
+    assert.match(runtimeSource, /if \(request\.requiredItemId !== undefined && request\.targetItemIds\.includes\(request\.requiredItemId\)\) return;/);
 });
 
 test("new selections are promoted to the front and selection order is preserved through refresh", async () => {
