@@ -3642,7 +3642,7 @@ export default class BetterCraftingPanel extends Component {
 
         const items = this.findMatchingItems(required);
         const visibleItems = this.getFilteredSortedSectionItems("dismantle", -2, "tool", items);
-        const selectableItems = visibleItems.filter(item => !this.isIncludedDismantleTargetItem(item));
+        const selectableItems = this.getSelectableDismantleRequiredItems(visibleItems);
         if (this.shouldReselectSection("dismantle", -2, "tool")) {
             this.dismantleRequiredSelection = selectableItems[0];
             this.clearSectionReselect("dismantle", -2, "tool");
@@ -4844,11 +4844,33 @@ export default class BetterCraftingPanel extends Component {
         return item === requiredItem;
     }
 
+    private getSelectableDismantleRequiredItems(visibleItems: readonly Item[]): Item[] {
+        const currentSelection = this.dismantleRequiredSelection;
+        if (!currentSelection || !visibleItems.includes(currentSelection)) {
+            return [...visibleItems];
+        }
+
+        return visibleItems.filter(item => item === currentSelection || !this.isIncludedDismantleTargetItem(item));
+    }
+
+    private getIncludedDismantleTargetIds(): Set<number> {
+        const includedIds = new Set<number>();
+        if (!this.dismantleSelectedItemType) return includedIds;
+
+        for (const item of this.findMatchingItems(this.dismantleSelectedItemType)) {
+            const itemId = getItemId(item);
+            if (itemId !== undefined && !this.dismantleExcludedIds.has(itemId) && !isItemProtected(item)) {
+                includedIds.add(itemId);
+            }
+        }
+
+        return includedIds;
+    }
+
     private isIncludedDismantleTargetItem(item: Item): boolean {
         const itemId = getItemId(item);
         return itemId !== undefined
-            && !this.dismantleExcludedIds.has(itemId)
-            && !isItemProtected(item);
+            && this.getIncludedDismantleTargetIds().has(itemId);
     }
 
     private getIncludedDismantleItems(): Item[] {

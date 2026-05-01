@@ -252,6 +252,8 @@ export default class BetterCraftingPanel extends Component {
     private hasDismantleDurabilityLimit;
     private hasDismantleStaminaLimit;
     private isReservedDismantleRequiredItem;
+    private getSelectableDismantleRequiredItems;
+    private getIncludedDismantleTargetIds;
     private isIncludedDismantleTargetItem;
     private getIncludedDismantleItems;
     private updateBulkMaxDisplay;

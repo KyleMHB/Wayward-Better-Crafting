@@ -140,6 +140,14 @@ test("dismantle required item is reserved from overlapping target selections", a
     assert.match(source, /private isReservedDismantleRequiredItem\(item: Item\): boolean \{/);
     assert.match(source, /return itemId === requiredItemId;/);
     assert.match(source, /return item === requiredItem;/);
+    assert.match(source, /const selectableItems = this\.getSelectableDismantleRequiredItems\(visibleItems\);/);
+    assert.match(source, /private getSelectableDismantleRequiredItems\(visibleItems: readonly Item\[\]\): Item\[\] \{/);
+    assert.match(source, /if \(!currentSelection \|\| !visibleItems\.includes\(currentSelection\)\) \{[\s\S]*return \[\.\.\.visibleItems\];/);
+    assert.match(source, /return visibleItems\.filter\(item => item === currentSelection \|\| !this\.isIncludedDismantleTargetItem\(item\)\);/);
+    assert.match(source, /private getIncludedDismantleTargetIds\(\): Set<number> \{/);
+    assert.match(source, /for \(const item of this\.findMatchingItems\(this\.dismantleSelectedItemType\)\) \{/);
+    assert.match(source, /includedIds\.add\(itemId\);/);
+    assert.match(source, /this\.getIncludedDismantleTargetIds\(\)\.has\(itemId\)/);
     assert.match(source, /return !this\.isReservedDismantleRequiredItem\(item\)/);
     assert.match(source, /const targets = this\.sanitizeSelectedItems\(this\.getIncludedDismantleItems\(\)\.slice\(0, quantity\)/);
     assert.match(source, /const targets = this\.getIncludedDismantleItems\(\)\.slice\(0, this\.bulkQuantity\);/);
