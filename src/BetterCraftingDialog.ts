@@ -5673,7 +5673,11 @@ export default class BetterCraftingPanel extends Component {
         const sorter = ItemSort.createSorter(state.sort, state.sortDirection);
 
         return visible.sort((a, b) => {
-            const sorted = sorter(a, b);
+            const sorted = state.sort === ContainerSort.Quality
+                ? state.sortDirection === SortDirection.Descending
+                    ? qualitySortKey(b.quality) - qualitySortKey(a.quality)
+                    : qualitySortKey(a.quality) - qualitySortKey(b.quality)
+                : sorter(a, b);
             if (sorted !== 0) return sorted;
 
             return (getItemId(a) ?? Number.MAX_SAFE_INTEGER) - (getItemId(b) ?? Number.MAX_SAFE_INTEGER);
