@@ -32,6 +32,12 @@ import {
 } from "./craftingSelection";
 import { getCraftStaminaCost } from "./craftStamina";
 import { getItemIdSafe, getItemIds } from "./itemIdentity";
+import {
+    getCraftDurabilityLoss,
+    getDismantleDurabilityLoss,
+    getRemainingDurabilityUses,
+    isItemProtected,
+} from "./itemState";
 import type {
     IBulkCraftRequest,
     ICraftSelectionRequest,
@@ -88,6 +94,13 @@ interface ISectionFilterState {
     debounceTimer: ReturnType<typeof setTimeout> | null;
 }
 
+interface IBulkLimitSnapshot {
+    max: number;
+    staminaMax: number;
+    materialMax: number;
+    durabilityMax: number;
+}
+
 interface INormalSplitSelection {
     consumed: Item[];
     used: Item[];
@@ -100,6 +113,8 @@ interface IBulkCraftSelection {
     permanentlyConsumedIds: Set<number>;
     slotSelections: Map<number, Item[]>;
 }
+
+type BulkCandidateCache = Map<string, Item[]>;
 
 interface IResolvedNormalCraftSelection {
     required: Item[];
@@ -180,10 +195,6 @@ function toRoman(n: number): string {
         while (n >= vals[i]) { result += syms[i]; n -= vals[i]; }
     }
     return result;
-}
-
-function isItemProtected(item: Item): boolean {
-    return (item as any).isProtected === true || (item as any).protected === true;
 }
 
 function getSectionCounterKey(slotIndex: number, semantic: SectionSemantic = "base"): string {
@@ -353,15 +364,16 @@ export default class BetterCraftingPanel extends Component {
             this.bulkSafeToggleEl.setChecked(enabled, false);
         }
 
+        const limits = this.computeBulkUiLimits();
         if (this.panelMode === "dismantle") {
-            this.updateBulkMaxDisplay();
-            this.updateBulkCraftBtnState();
+            this.updateBulkMaxDisplay(limits);
+            this.updateBulkCraftBtnState(limits);
             return;
         }
 
         if (this.activeTab === "bulk") {
-            this.updateBulkMaxDisplay();
-            this.updateBulkCraftBtnState();
+            this.updateBulkMaxDisplay(limits);
+            this.updateBulkCraftBtnState(limits);
         }
     }
 
@@ -1374,13 +1386,14 @@ export default class BetterCraftingPanel extends Component {
         this.bulkQtyInputEl.addEventListener("change", () => {
             const v = parseInt(this.bulkQtyInputEl!.value, 10);
             if (!isNaN(v) && v >= 1) {
-                const max = this.computeBulkMax();
+                const limits = this.computeBulkUiLimits();
+                const max = limits.max;
                 // Clamp to max regardless of whether max is 0; floor to 1 for display
                 // (craft button is disabled when max === 0 via updateBulkCraftBtnState).
                 this.bulkQuantity = max > 0 ? Math.min(v, max) : 1;
                 if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = String(this.bulkQuantity);
-                this.updateBulkMaxDisplay();
-                this.updateBulkCraftBtnState();
+                this.updateBulkMaxDisplay(limits);
+                this.updateBulkCraftBtnState(limits);
             } else {
                 this.bulkQtyInputEl!.value = String(this.bulkQuantity);
             }
@@ -2371,8 +2384,9 @@ export default class BetterCraftingPanel extends Component {
         if (!preserveQuantity) {
             this.bulkQuantity = 1;
             if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = "1";
-            this.updateBulkMaxDisplay();
-            this.updateBulkCraftBtnState();
+            const limits = this.computeBulkUiLimits();
+            this.updateBulkMaxDisplay(limits);
+            this.updateBulkCraftBtnState(limits);
         }
     }
 
@@ -2797,7 +2811,9 @@ export default class BetterCraftingPanel extends Component {
             const handler = new ItemComponentHandler({ getItemType: () => itemType, noDrag: true });
             const iconComp = ItemComponent.create(handler);
             if (iconComp) iconHolder.appendChild(iconComp.element);
-        } catch { /* silent */ }
+        } catch (error) {
+            this.debugLog("Failed to create output card item icon.", { itemType, error });
+        }
         row1.appendChild(iconHolder);
 
         const itemName = (() => {
@@ -3209,7 +3225,9 @@ export default class BetterCraftingPanel extends Component {
                 itemComp.style.set("margin-right", "5px");
                 row.append(itemComp);
             }
-        } catch { /* silent */ }
+        } catch (error) {
+            this.debugLog("Failed to create normal selection item icon.", { itemId: getItemId(item), itemType: item.type, error });
+        }
 
         const nameText = new Text();
         nameText.setText(TranslationImpl.generator(displayName));
@@ -3219,7 +3237,7 @@ export default class BetterCraftingPanel extends Component {
         row.append(nameText);
 
         if (component && component.consumedAmount <= 0) {
-            this.appendRemainingUsesHint(row.element, item, this.getCraftDurabilityLoss(item), false);
+            this.appendRemainingUsesHint(row.element, item, getCraftDurabilityLoss(item), false);
         }
 
         if (conflictRole !== undefined) {
@@ -3350,7 +3368,9 @@ export default class BetterCraftingPanel extends Component {
                 itemComp.style.set("margin-right", "5px");
                 row.append(itemComp);
             }
-        } catch { /* silent */ }
+        } catch (error) {
+            this.debugLog("Failed to create split selection item icon.", { itemId: getItemId(item), itemType: item.type, error });
+        }
 
         const nameText = new Text();
         nameText.setText(TranslationImpl.generator(displayName));
@@ -3360,7 +3380,7 @@ export default class BetterCraftingPanel extends Component {
         row.append(nameText);
 
         if (semantic === "used" && !disabled) {
-            this.appendRemainingUsesHint(row.element, item, this.getCraftDurabilityLoss(item), false);
+            this.appendRemainingUsesHint(row.element, item, getCraftDurabilityLoss(item), false);
         }
 
         if (disabledRole !== undefined) {
@@ -3440,7 +3460,7 @@ export default class BetterCraftingPanel extends Component {
             noRecipe.setText(TranslationImpl.generator("No recipe found for this item."));
             noRecipe.style.set("color", "#ff6666");
             this.bulkScrollInner.append(noRecipe);
-            this.updateBulkCraftBtnState();
+            this.updateBulkCraftBtnState(this.computeBulkUiLimits());
             this.restoreScrollPosition(this.bulkScrollContent, scrollTop, scrollLeft, preserveScroll);
             return;
         }
@@ -3486,8 +3506,9 @@ export default class BetterCraftingPanel extends Component {
             this.bulkQuantity = 1;
             if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = "1";
         }
-        this.updateBulkMaxDisplay();
-        this.updateBulkCraftBtnState();
+        const limits = this.computeBulkUiLimits();
+        this.updateBulkMaxDisplay(limits);
+        this.updateBulkCraftBtnState(limits);
         this.restoreScrollPosition(this.bulkScrollContent, scrollTop, scrollLeft, preserveScroll);
     }
 
@@ -3510,7 +3531,7 @@ export default class BetterCraftingPanel extends Component {
             noDismantle.setText(TranslationImpl.generator("No dismantle data found for this item."));
             noDismantle.style.set("color", "#ff6666");
             this.bulkScrollInner.append(noDismantle);
-            this.updateBulkCraftBtnState();
+            this.updateBulkCraftBtnState(this.computeBulkUiLimits());
             this.restoreScrollPosition(this.bulkScrollContent, scrollTop, scrollLeft, preserveScroll);
             return;
         }
@@ -3522,10 +3543,11 @@ export default class BetterCraftingPanel extends Component {
             this.addDismantleRequiredSection(dismantle.required);
         }
 
-        this.bulkQuantity = Math.max(1, Math.min(this.bulkQuantity, this.computeDismantleMax() || 1));
+        const limits = this.computeBulkUiLimits();
+        this.bulkQuantity = Math.max(1, Math.min(this.bulkQuantity, limits.max || 1));
         if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = String(this.bulkQuantity);
-        this.updateBulkMaxDisplay();
-        this.updateBulkCraftBtnState();
+        this.updateBulkMaxDisplay(limits);
+        this.updateBulkCraftBtnState(limits);
         this.restoreScrollPosition(this.bulkScrollContent, scrollTop, scrollLeft, preserveScroll);
     }
 
@@ -3755,7 +3777,7 @@ export default class BetterCraftingPanel extends Component {
         nameText.style.set("font-size", "inherit");
         row.append(nameText);
 
-        this.appendRemainingUsesHint(row.element, item, this.getDismantleDurabilityLoss(item), this.preserveDismantleRequiredDurability);
+        this.appendRemainingUsesHint(row.element, item, getDismantleDurabilityLoss(item, ActionType.Dismantle), this.preserveDismantleRequiredDurability);
 
         if (disabled) {
             const disabledText = document.createElement("span");
@@ -3805,8 +3827,9 @@ export default class BetterCraftingPanel extends Component {
         protect.style.set("margin", "0");
         protect.event.subscribe("toggle", (_: unknown, checked: boolean) => {
             this.bulkPreserveDurabilityBySlot.set(slotIndex, checked);
-            this.updateBulkMaxDisplay();
-            this.updateBulkCraftBtnState();
+            const limits = this.computeBulkUiLimits();
+            this.updateBulkMaxDisplay(limits);
+            this.updateBulkCraftBtnState(limits);
             this.buildBulkContent(false, true);
         });
         wrapper.appendChild(protect.element);
@@ -3837,8 +3860,9 @@ export default class BetterCraftingPanel extends Component {
         protect.style.set("margin", "0");
         protect.event.subscribe("toggle", (_: unknown, checked: boolean) => {
             this.preserveDismantleRequiredDurability = checked;
-            this.updateBulkMaxDisplay();
-            this.updateBulkCraftBtnState();
+            const limits = this.computeBulkUiLimits();
+            this.updateBulkMaxDisplay(limits);
+            this.updateBulkCraftBtnState(limits);
             this.buildDismantleContent(false);
         });
         wrapper.appendChild(protect.element);
@@ -3852,7 +3876,7 @@ export default class BetterCraftingPanel extends Component {
 
     private getMaxUsesText(item: Item, perUseLoss: number, protect: boolean): string {
         if (perUseLoss <= 0) return "";
-        const maxUses = this.getRemainingUses(item, perUseLoss, protect);
+        const maxUses = getRemainingDurabilityUses(item.durability, perUseLoss, protect);
         if (maxUses >= Number.MAX_SAFE_INTEGER || maxUses <= 0) return "";
         return `uses remaining ${maxUses}`;
     }
@@ -3907,8 +3931,9 @@ export default class BetterCraftingPanel extends Component {
                     if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = String(this.bulkQuantity);
                 }
                 sync();
-                this.updateBulkMaxDisplay();
-                this.updateBulkCraftBtnState();
+                const limits = this.computeBulkUiLimits();
+                this.updateBulkMaxDisplay(limits);
+                this.updateBulkCraftBtnState(limits);
             });
         }
 
@@ -4291,7 +4316,9 @@ export default class BetterCraftingPanel extends Component {
                 itemComp.style.set("margin-right", "5px");
                 row.append(itemComp);
             }
-        } catch { /* silent */ }
+        } catch (error) {
+            this.debugLog("Failed to create bulk consumed item icon.", { itemId: getItemId(item), itemType: item.type, error });
+        }
 
         const nameText = new Text();
         nameText.setText(TranslationImpl.generator(displayName));
@@ -4431,7 +4458,9 @@ export default class BetterCraftingPanel extends Component {
                 itemComp.style.set("margin-right", "5px");
                 row.append(itemComp);
             }
-        } catch { /* silent */ }
+        } catch (error) {
+            this.debugLog("Failed to create bulk used item icon.", { itemId: getItemId(item), itemType: item.type, error });
+        }
 
         const nameText = new Text();
         nameText.setText(TranslationImpl.generator(displayName));
@@ -4441,7 +4470,7 @@ export default class BetterCraftingPanel extends Component {
         row.append(nameText);
 
         if (!isDisabled()) {
-            this.appendRemainingUsesHint(row.element, item, this.getCraftDurabilityLoss(item), this.bulkPreserveDurabilityBySlot.get(slotIndex) ?? true);
+            this.appendRemainingUsesHint(row.element, item, getCraftDurabilityLoss(item), this.bulkPreserveDurabilityBySlot.get(slotIndex) ?? true);
         }
 
         if (isDisabled()) {
@@ -4570,7 +4599,9 @@ export default class BetterCraftingPanel extends Component {
                 itemComp.style.set("margin-right", "5px");
                 row.append(itemComp);
             }
-        } catch { /* silent */ }
+        } catch (error) {
+            this.debugLog("Failed to create bulk tool item icon.", { itemId: getItemId(item), itemType: item.type, error });
+        }
 
         const nameText = new Text();
         nameText.setText(TranslationImpl.generator(displayName));
@@ -4579,7 +4610,7 @@ export default class BetterCraftingPanel extends Component {
         nameText.style.set("font-size", "inherit");
         row.append(nameText);
 
-        this.appendRemainingUsesHint(row.element, item, this.getCraftDurabilityLoss(item), this.bulkPreserveDurabilityBySlot.get(slotIndex) ?? true);
+        this.appendRemainingUsesHint(row.element, item, getCraftDurabilityLoss(item), this.bulkPreserveDurabilityBySlot.get(slotIndex) ?? true);
 
         if (reservedRole !== undefined) {
             const disabledText = document.createElement("span");
@@ -4630,28 +4661,8 @@ export default class BetterCraftingPanel extends Component {
 
     // ── Bulk quantity helpers ─────────────────────────────────────────────────
 
-    private getCraftDurabilityLoss(item: Item): number {
-        return Math.max(0, item.getDamageModifier?.() ?? 0);
-    }
-
-    private getDismantleDurabilityLoss(item: Item): number {
-        return Math.max(0, (item.description as any)?.damageOnUse?.[ActionType.Dismantle] ?? item.getDamageModifier?.() ?? 0);
-    }
-
-    private getRemainingUses(item: Item, perUseLoss: number, leaveOneUse: boolean): number {
-        if (perUseLoss <= 0) return Number.MAX_SAFE_INTEGER;
-        const durability = item.durability ?? 0;
-        if (durability <= 0) return 0;
-
-        const usableActions = Math.ceil(durability / perUseLoss);
-        return Math.max(0, usableActions - (leaveOneUse ? 1 : 0));
-    }
-
-    private computeBulkDurabilityMax(excludedIds: Set<number>): number {
-        if (!this.recipe) return Number.MAX_SAFE_INTEGER;
-
-        const selection = this.resolveBulkCraftSelection(this.itemType as ItemType, excludedIds);
-        if (!selection) return 0;
+    private computeBulkDurabilityMaxFromSelection(selection: IBulkCraftSelection): number {
+        if (!this.recipe) return 0;
 
         let durabilityMax = Number.MAX_SAFE_INTEGER;
         for (let i = 0; i < this.recipe.components.length; i++) {
@@ -4666,7 +4677,7 @@ export default class BetterCraftingPanel extends Component {
             for (const item of durabilityItems) {
                 durabilityMax = Math.min(
                     durabilityMax,
-                    this.getRemainingUses(item, this.getCraftDurabilityLoss(item), preserveDurability),
+                    getRemainingDurabilityUses(item.durability, getCraftDurabilityLoss(item), preserveDurability),
                 );
             }
         }
@@ -4712,12 +4723,21 @@ export default class BetterCraftingPanel extends Component {
             : staminaCost > 0 ? Math.floor(currentStamina / staminaCost) : 9999;
 
         let materialMax = 0;
+        let durabilityMax = Number.MAX_SAFE_INTEGER;
         const excludedIds = this.getBulkExcludedIds();
         const permanentlyConsumedIds = new Set<number>();
+        const materialIterationCap = this.safeCraftingEnabled
+            ? Math.max(1, Math.min(9999, staminaMax))
+            : 9999;
+        const candidateCache = this.createBulkCandidateCache();
 
-        for (let i = 0; i < 9999; i++) {
-            const selection = this.resolveBulkCraftSelection(this.itemType as ItemType, excludedIds, permanentlyConsumedIds);
+        for (let i = 0; i < materialIterationCap; i++) {
+            const selection = this.resolveBulkCraftSelection(this.itemType as ItemType, excludedIds, permanentlyConsumedIds, candidateCache);
             if (!selection) break;
+
+            if (i === 0) {
+                durabilityMax = this.computeBulkDurabilityMaxFromSelection(selection);
+            }
 
             for (const id of selection.permanentlyConsumedIds) {
                 permanentlyConsumedIds.add(id);
@@ -4726,34 +4746,7 @@ export default class BetterCraftingPanel extends Component {
             materialMax++;
         }
 
-        const durabilityMax = this.computeBulkDurabilityMax(excludedIds);
-        return { staminaMax, materialMax, durabilityMax };
-
-        // Base component (slot -1) — always consumed
-        if (this.recipe!.baseComponent !== undefined) {
-            const excluded = this.bulkExcludedIds.get(-1) ?? new Set<number>();
-            const available = this.findMatchingItems(this.recipe!.baseComponent!)
-                .filter(item => {
-                    const itemId = getItemId(item);
-                    return itemId === undefined || !excluded.has(itemId);
-                });
-            materialMax = Math.min(materialMax, available.length);
-        }
-
-        for (let i = 0; i < this.recipe!.components.length; i++) {
-            const comp = this.recipe!.components[i];
-            if (comp.consumedAmount <= 0) continue; // tool — not consumed
-            const excluded = this.bulkExcludedIds.get(i) ?? new Set<number>();
-            const available = this.findMatchingItems(comp.type)
-                .filter(item => {
-                    const itemId = getItemId(item);
-                    return itemId === undefined || !excluded.has(itemId);
-                });
-            const perCraft = comp.requiredAmount;
-            if (perCraft <= 0) continue;
-            materialMax = Math.min(materialMax, Math.floor(available.length / perCraft));
-        }
-
+        if (materialMax === 0) durabilityMax = 0;
         return { staminaMax, materialMax, durabilityMax };
     }
 
@@ -4765,8 +4758,36 @@ export default class BetterCraftingPanel extends Component {
         if (this.panelMode === "dismantle") {
             return this.computeDismantleMax();
         }
+        return this.computeBulkUiLimits().max;
+    }
+
+    private computeBulkUiLimits(): IBulkLimitSnapshot {
+        if (this.panelMode === "dismantle") {
+            const materialMax = this.getIncludedDismantleItems().length;
+            const staminaMax = this.computeDismantleStaminaMax();
+            const durabilityMax = !this.dismantleRequiredSelection
+                ? Number.MAX_SAFE_INTEGER
+                : getRemainingDurabilityUses(
+                    this.dismantleRequiredSelection.durability,
+                    getDismantleDurabilityLoss(this.dismantleRequiredSelection, ActionType.Dismantle),
+                    this.preserveDismantleRequiredDurability,
+                );
+
+            return {
+                max: Math.max(0, Math.min(materialMax, staminaMax, durabilityMax)),
+                staminaMax,
+                materialMax,
+                durabilityMax,
+            };
+        }
+
         const { staminaMax, materialMax, durabilityMax } = this.computeBulkLimits();
-        return Math.max(0, Math.min(staminaMax, materialMax, durabilityMax));
+        return {
+            staminaMax,
+            materialMax,
+            durabilityMax,
+            max: Math.max(0, Math.min(staminaMax, materialMax, durabilityMax)),
+        };
     }
 
     private computeDismantleStaminaMax(): number {
@@ -4785,9 +4806,9 @@ export default class BetterCraftingPanel extends Component {
         const staminaMax = this.computeDismantleStaminaMax();
         const durabilityMax = !this.dismantleRequiredSelection
             ? Number.MAX_SAFE_INTEGER
-            : this.getRemainingUses(
-                this.dismantleRequiredSelection,
-                this.getDismantleDurabilityLoss(this.dismantleRequiredSelection),
+            : getRemainingDurabilityUses(
+                this.dismantleRequiredSelection.durability,
+                getDismantleDurabilityLoss(this.dismantleRequiredSelection, ActionType.Dismantle),
                 this.preserveDismantleRequiredDurability,
             );
 
@@ -4796,9 +4817,9 @@ export default class BetterCraftingPanel extends Component {
 
     private hasDismantleDurabilityLimit(): boolean {
         if (!this.dismantleRequiredSelection) return false;
-        const perUseLoss = this.getDismantleDurabilityLoss(this.dismantleRequiredSelection);
-        return this.getRemainingUses(
-            this.dismantleRequiredSelection,
+        const perUseLoss = getDismantleDurabilityLoss(this.dismantleRequiredSelection, ActionType.Dismantle);
+        return getRemainingDurabilityUses(
+            this.dismantleRequiredSelection.durability,
             perUseLoss,
             this.preserveDismantleRequiredDurability,
         ) === 0;
@@ -4840,9 +4861,9 @@ export default class BetterCraftingPanel extends Component {
         });
     }
 
-    private updateBulkMaxDisplay(): void {
+    private updateBulkMaxDisplay(limits = this.computeBulkUiLimits()): void {
         if (this.panelMode === "dismantle") {
-            const max = this.computeDismantleMax();
+            const max = limits.max;
             if (this.bulkMaxLabel) {
                 if (max > 0) {
                     this.bulkMaxLabel.textContent = `(max ${max})`;
@@ -4865,8 +4886,7 @@ export default class BetterCraftingPanel extends Component {
             return;
         }
 
-        const { staminaMax, materialMax, durabilityMax } = this.computeBulkLimits();
-        const max = Math.max(0, Math.min(staminaMax, materialMax, durabilityMax));
+        const { staminaMax, materialMax, durabilityMax, max } = limits;
         if (this.bulkMaxLabel) {
             if (max > 0) {
                 this.bulkMaxLabel.textContent = `(max ${max})`;
@@ -4890,7 +4910,8 @@ export default class BetterCraftingPanel extends Component {
     }
 
     private adjustBulkQty(delta: number): void {
-        const max = this.computeBulkMax();
+        const limits = this.computeBulkUiLimits();
+        const max = limits.max;
         let newQty = this.bulkQuantity + delta;
         // Clamp to [1, max] when max > 0; when max === 0, pin to 1 so + does nothing.
         const effectiveMax = max > 0 ? max : 1;
@@ -4898,14 +4919,13 @@ export default class BetterCraftingPanel extends Component {
         if (newQty < 1) newQty = 1;
         this.bulkQuantity = newQty;
         if (this.bulkQtyInputEl) this.bulkQtyInputEl.value = String(this.bulkQuantity);
-        this.updateBulkMaxDisplay();
-        this.updateBulkCraftBtnState();
+        this.updateBulkMaxDisplay(limits);
+        this.updateBulkCraftBtnState(limits);
     }
 
-    private updateBulkCraftBtnState(): void {
+    private updateBulkCraftBtnState(limits = this.computeBulkUiLimits()): void {
         if (!this.bulkCraftBtnEl) return;
-        const max = this.computeBulkMax();
-        const canCraft = max > 0 && this.bulkQuantity >= 1;
+        const canCraft = limits.max > 0 && this.bulkQuantity >= 1;
         if (canCraft) {
             this.bulkCraftBtnEl.classes.remove("bc-craft-disabled");
         } else {
@@ -5024,6 +5044,7 @@ export default class BetterCraftingPanel extends Component {
         itemType: ItemType,
         excludedIds: ReadonlySet<number>,
         permanentlyConsumedIds: ReadonlySet<number> = new Set<number>(),
+        candidateCache = this.createBulkCandidateCache(),
     ): IBulkCraftSelection | null {
         this.lastBulkResolutionMessage = undefined;
         const recipe = itemDescriptions[itemType]?.recipe;
@@ -5054,7 +5075,7 @@ export default class BetterCraftingPanel extends Component {
                 if (pinnedUsed.length === 0) continue;
 
                 const pinnedUsedIds = pinnedUsed.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
-                const candidates = this.getFilteredSortedSectionItems("bulk", i, "used", this.findMatchingItems(comp.type)).filter(item => {
+                const candidates = this.getBulkCachedCandidates(candidateCache, comp.type, i, "used").filter(item => {
                     const itemId = getItemId(item);
                     return itemId !== undefined
                         && !excludedIds.has(itemId)
@@ -5088,7 +5109,7 @@ export default class BetterCraftingPanel extends Component {
             if (pinned.length === 0) continue;
 
             const pinnedIds = pinned.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
-            const candidates = this.getFilteredSortedSectionItems("bulk", i, "tool", this.findMatchingItems(comp.type)).filter(item => {
+            const candidates = this.getBulkCachedCandidates(candidateCache, comp.type, i, "tool").filter(item => {
                 const itemId = getItemId(item);
                 return itemId !== undefined
                     && !excludedIds.has(itemId)
@@ -5116,7 +5137,7 @@ export default class BetterCraftingPanel extends Component {
         }
 
         if (recipe.baseComponent !== undefined) {
-            const candidates = this.findBulkCandidates(recipe.baseComponent, excludedIds, reservedIds, -1, "base");
+            const candidates = this.findBulkCandidates(recipe.baseComponent, excludedIds, reservedIds, -1, "base", candidateCache);
             if (candidates.length === 0) return null;
 
             base = candidates[0];
@@ -5140,7 +5161,7 @@ export default class BetterCraftingPanel extends Component {
                     return null;
                 }
 
-                const consumedCandidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds, i, "consumed");
+                const consumedCandidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds, i, "consumed", candidateCache);
                 if (consumedCandidates.length < consumedCount) return null;
                 const pickedConsumed = consumedCandidates.slice(0, consumedCount);
                 for (const item of pickedConsumed) {
@@ -5152,7 +5173,7 @@ export default class BetterCraftingPanel extends Component {
             }
 
             if (comp.consumedAmount <= 0) continue;
-            const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds, i, "consumed");
+            const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds, i, "consumed", candidateCache);
             if (candidates.length < comp.requiredAmount) return null;
 
             const picked = candidates.slice(0, comp.requiredAmount);
@@ -5216,7 +5237,7 @@ export default class BetterCraftingPanel extends Component {
                 return resolveToolSlots(toolSlotPosition + 1);
             }
 
-            const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds, slotIndex, "tool");
+            const candidates = this.findBulkCandidates(comp.type, excludedIds, reservedIds, slotIndex, "tool", candidateCache);
             if (candidates.length < comp.requiredAmount) return false;
 
             const pinned = this.bulkPinnedToolSelections.get(slotIndex) ?? [];
@@ -5320,14 +5341,34 @@ export default class BetterCraftingPanel extends Component {
         reservedIds: ReadonlySet<number>,
         slotIndex: number,
         semantic: SectionSemantic,
+        candidateCache = this.createBulkCandidateCache(),
     ): Item[] {
-        return this.getFilteredSortedSectionItems("bulk", slotIndex, semantic, this.findMatchingItems(type)).filter(item => {
+        return this.getBulkCachedCandidates(candidateCache, type, slotIndex, semantic).filter(item => {
             const itemId = getItemId(item);
             return itemId !== undefined
                 && !excludedIds.has(itemId)
                 && !reservedIds.has(itemId)
                 && !isItemProtected(item);
         });
+    }
+
+    private createBulkCandidateCache(): BulkCandidateCache {
+        return new Map<string, Item[]>();
+    }
+
+    private getBulkCachedCandidates(
+        cache: BulkCandidateCache,
+        type: ItemType | ItemTypeGroup,
+        slotIndex: number,
+        semantic: SectionSemantic,
+    ): Item[] {
+        const key = `${slotIndex}:${semantic}:${type}`;
+        const cached = cache.get(key);
+        if (cached) return cached;
+
+        const candidates = this.getFilteredSortedSectionItems("bulk", slotIndex, semantic, this.findMatchingItems(type));
+        cache.set(key, candidates);
+        return candidates;
     }
 
     private bcGetOrCreateTooltip(): HTMLDivElement {
@@ -5623,6 +5664,12 @@ export default class BetterCraftingPanel extends Component {
         return reservations;
     }
 
+    private getDefaultSectionSortDirection(sort: ContainerSort): SortDirection {
+        return sort === ContainerSort.Quality
+            ? SortDirection.Descending
+            : SortDirection.Ascending;
+    }
+
     private getSectionFilterState(view: SectionView, slotIndex: number, semantic: SectionSemantic): ISectionFilterState {
         const key = this.getSectionStateKey(view, slotIndex, semantic);
         let state = this.sectionFilterStates.get(key);
@@ -5630,7 +5677,7 @@ export default class BetterCraftingPanel extends Component {
             state = {
                 filterText: "",
                 sort: ContainerSort.Quality,
-                sortDirection: SortDirection.Descending,
+                sortDirection: this.getDefaultSectionSortDirection(ContainerSort.Quality),
                 debounceTimer: null,
             };
             this.sectionFilterStates.set(key, state);
@@ -5728,8 +5775,9 @@ export default class BetterCraftingPanel extends Component {
             sort.appendChild(option);
         }
         sort.addEventListener("change", () => {
-            state.sort = Number(sort.value) as ContainerSort;
-            this.pendingSectionReselectKeys.add(key);
+            const selectedSort = Number(sort.value) as ContainerSort;
+            state.sort = selectedSort;
+            state.sortDirection = this.getDefaultSectionSortDirection(selectedSort);
             rebuild();
         });
         controls.appendChild(sort);
@@ -5744,7 +5792,6 @@ export default class BetterCraftingPanel extends Component {
             state.sortDirection = state.sortDirection === SortDirection.Descending
                 ? SortDirection.Ascending
                 : SortDirection.Descending;
-            this.pendingSectionReselectKeys.add(key);
             rebuild();
         });
         controls.appendChild(direction);

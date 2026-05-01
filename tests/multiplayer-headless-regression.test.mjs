@@ -152,8 +152,9 @@ test("safe toggle is shown only in bulk footer and refreshes bulk state with saf
     assert.match(source, /this\.bulkSafeToggleWrap = this\.createSafeToggle/);
     assert.match(source, /label\.textContent = "Safe";/);
     assert.match(source, /toggle\.setChecked\(this\.safeCraftingEnabled, false\);/);
-    assert.match(source, /this\.updateBulkMaxDisplay\(\);/);
-    assert.match(source, /this\.updateBulkCraftBtnState\(\);/);
+    assert.match(source, /const limits = this\.computeBulkUiLimits\(\);/);
+    assert.match(source, /this\.updateBulkMaxDisplay\(limits\);/);
+    assert.match(source, /this\.updateBulkCraftBtnState\(limits\);/);
     assert.doesNotMatch(source, /private normalSafeToggleEl: CheckButton \| null = null;/);
     assert.doesNotMatch(source, /this\.normalSafeToggleWrap = this\.createSafeToggle/);
 });
@@ -163,19 +164,30 @@ test("remaining uses are shown for all eligible non-consumed craft rows", async 
 
     assert.match(source, /if \(maxUses >= Number\.MAX_SAFE_INTEGER \|\| maxUses <= 0\) return "";/);
     assert.match(source, /return `uses remaining \$\{maxUses\}`;/);
-    assert.match(source, /const usableActions = Math\.ceil\(durability \/ perUseLoss\);/);
-    assert.match(source, /this\.appendRemainingUsesHint\(row\.element, item, this\.getCraftDurabilityLoss\(item\), false\);/);
-    assert.match(source, /this\.appendRemainingUsesHint\(row\.element, item, this\.getCraftDurabilityLoss\(item\), this\.bulkPreserveDurabilityBySlot\.get\(slotIndex\) \?\? true\);/);
-    assert.match(source, /this\.appendRemainingUsesHint\(row\.element, item, this\.getDismantleDurabilityLoss\(item\), this\.preserveDismantleRequiredDurability\);/);
+    assert.match(source, /getRemainingDurabilityUses\(item\.durability, perUseLoss, protect\)/);
+    assert.match(source, /this\.appendRemainingUsesHint\(row\.element, item, getCraftDurabilityLoss\(item\), false\);/);
+    assert.match(source, /this\.appendRemainingUsesHint\(row\.element, item, getCraftDurabilityLoss\(item\), this\.bulkPreserveDurabilityBySlot\.get\(slotIndex\) \?\? true\);/);
+    assert.match(source, /this\.appendRemainingUsesHint\(row\.element, item, getDismantleDurabilityLoss\(item, ActionType\.Dismantle\), this\.preserveDismantleRequiredDurability\);/);
 });
 
 test("dismantle runtime and UI share the same preserve-one-use semantics", async () => {
     const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+    const helperSource = await readFile(new URL("../src/itemState.ts", import.meta.url), "utf8");
 
-    assert.match(source, /private getRemainingDurabilityUses\(requiredItem: Item, perUseLoss: number, leaveOneUse: boolean\): number \{/);
-    assert.match(source, /const usableActions = Math\.ceil\(durability \/ perUseLoss\);/);
-    assert.match(source, /return Math\.max\(0, usableActions - \(leaveOneUse \? 1 : 0\)\);/);
+    assert.match(source, /getDismantleDurabilityLoss\(requiredItem, ActionType\.Dismantle\)/);
+    assert.match(source, /canUseDurability\(requiredItem\.durability, perUseLoss, leaveOneUse\)/);
+    assert.match(helperSource, /export function getRemainingDurabilityUses/);
+    assert.match(helperSource, /const usableActions = Math\.ceil\(durability \/ perUseLoss\);/);
+    assert.match(helperSource, /return Math\.max\(0, usableActions - \(leaveOneUse \? 1 : 0\)\);/);
     assert.match(source, /private canUseForDismantle\(requiredItem\?: Item, leaveOneUse = false\): boolean \{/);
+});
+
+test("bulk approval validates quantity and simulates every requested iteration", async () => {
+    const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+
+    assert.match(source, /if \(!Number\.isFinite\(request\.quantity\) \|\| !Number\.isInteger\(request\.quantity\) \|\| request\.quantity <= 0 \|\| request\.quantity > 9999\)/);
+    assert.match(source, /for \(let i = 0; i < request\.quantity; i\+\+\)/);
+    assert.match(source, /sessionConsumedIds = resolved\.value\.sessionConsumedIds;/);
 });
 
 test("bulk durability limits only preserve one use when Protect remains enabled", async () => {
@@ -187,18 +199,40 @@ test("bulk durability limits only preserve one use when Protect remains enabled"
     assert.match(source, /if \(pinned\.length > 0\) \{/);
 });
 
+test("bulk limit updates reuse a shared snapshot instead of recomputing max twice", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    assert.match(source, /private computeBulkUiLimits\(\): IBulkLimitSnapshot \{/);
+    assert.match(source, /const limits = this\.computeBulkUiLimits\(\);/);
+    assert.match(source, /this\.updateBulkMaxDisplay\(limits\);/);
+    assert.match(source, /this\.updateBulkCraftBtnState\(limits\);/);
+    assert.match(source, /const materialIterationCap = this\.safeCraftingEnabled/);
+    assert.doesNotMatch(source, /for \(let i = 0; i < 9999; i\+\+\)/);
+    assert.doesNotMatch(source, /return \{ staminaMax, materialMax, durabilityMax \};\s*\/\//);
+});
+
 test("section filters drive visible item ordering and active reselection", async () => {
     const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+    const sortChangeBody = source.match(/sort\.addEventListener\("change", \(\) => \{([\s\S]*?)\n        \}\);/)?.[1] ?? "";
+    const directionClickBody = source.match(/direction\.addEventListener\("click", \(\) => \{([\s\S]*?)\n        \}\);/)?.[1] ?? "";
 
     assert.match(source, /private getFilteredSortedSectionItems\(/);
     assert.match(source, /ItemSort\.createSorter\(state\.sort, state\.sortDirection\)/);
     assert.match(source, /private pendingSectionReselectKeys: Set<string> = new Set\(\);/);
+    assert.match(source, /private getDefaultSectionSortDirection\(sort: ContainerSort\): SortDirection \{/);
+    assert.match(source, /sort === ContainerSort\.Quality[\s\S]*SortDirection\.Descending[\s\S]*SortDirection\.Ascending/);
     assert.match(source, /private normalizeNormalSelectionsForRender\(\): void \{/);
     assert.match(source, /this\.normalizeNormalSelectionsForRender\(\);/);
     assert.match(source, /private normalizeBulkSelectionsForRender\(\): void \{/);
     assert.match(source, /this\.normalizeBulkSelectionsForRender\(\);/);
     assert.match(source, /this\.dismantleExcludedIds\.clear\(\);/);
     assert.match(source, /if \(this\.isTypingInEditableControl\(e\.target\)\) return;/);
+    assert.match(source, /filter\.addEventListener\("input", \(\) => \{[\s\S]*this\.pendingSectionReselectKeys\.add\(key\);[\s\S]*rebuild\(\);/);
+    assert.match(sortChangeBody, /const selectedSort = Number\(sort\.value\) as ContainerSort;/);
+    assert.match(sortChangeBody, /state\.sort = selectedSort;/);
+    assert.match(sortChangeBody, /state\.sortDirection = this\.getDefaultSectionSortDirection\(selectedSort\);/);
+    assert.doesNotMatch(sortChangeBody, /pendingSectionReselectKeys\.add\(key\)/);
+    assert.doesNotMatch(directionClickBody, /pendingSectionReselectKeys\.add\(key\)/);
     assert.match(source, /direction\.textContent = "↕";/);
     assert.doesNotMatch(source, /direction\.textContent = state\.sortDirection === SortDirection\.Descending/);
 });
@@ -309,7 +343,7 @@ test("fresh crafting sections default to quality descending after reset", async 
     const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
 
     assert.match(source, /private clearSectionFilterStates\(\): void \{[\s\S]*this\.sectionFilterStates\.clear\(\);/);
-    assert.match(source, /sort: ContainerSort\.Quality,\s+sortDirection: SortDirection\.Descending,/);
+    assert.match(source, /sort: ContainerSort\.Quality,\s+sortDirection: this\.getDefaultSectionSortDirection\(ContainerSort\.Quality\),/);
     assert.match(source, /state\.sort === ContainerSort\.Quality[\s\S]*qualitySortKey\(b\.quality\) - qualitySortKey\(a\.quality\)/);
     assert.match(source, /public showPanel\(\) \{[\s\S]*if \(!wasVisible\) \{[\s\S]*this\.clearSectionFilterStates\(\);/);
 });

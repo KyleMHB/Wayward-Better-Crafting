@@ -35,6 +35,11 @@ import {
 } from "./src/craftingSelection";
 import { getCraftStaminaCost } from "./src/craftStamina";
 import { getItemIdSafe, getItemIds } from "./src/itemIdentity";
+import {
+    canUseDurability,
+    getDismantleDurabilityLoss,
+    isItemProtected,
+} from "./src/itemState";
 import type {
     IBetterCraftingRequestStatus,
     IBulkActionAbortRequest,
@@ -168,10 +173,6 @@ interface IServerCraftBlockDiagnostics {
         consumedCount: number;
         hasBase: boolean;
     };
-}
-
-function isItemProtected(item: Item): boolean {
-    return (item as any).isProtected === true || (item as any).protected === true;
 }
 
 function getItemId(item: Item | undefined): number | undefined {
@@ -1805,11 +1806,14 @@ export default class BetterCrafting extends Mod {
      *
      * MUST be called BEFORE execute().
      */
-    private waitForTurnEnd(): Promise<void> {
+    private waitForTurnEnd(timeoutMs = 10_000): Promise<void> {
+        const player = localPlayer;
+        if (!player?.event?.subscribeNext) return Promise.resolve();
+
         const turnEndPromise = new Promise<void>(resolve => {
-            localPlayer.event.subscribeNext("turnEnd", () => {
+            player.event.subscribeNext("turnEnd", () => {
                 const poll = () => {
-                    if (this.bulkAbortController?.aborted || !(localPlayer as any).hasDelay?.()) {
+                    if (this.bulkAbortController?.aborted || !(localPlayer as any)?.hasDelay?.()) {
                         resolve();
                     } else {
                         requestAnimationFrame(poll);
@@ -1826,13 +1830,34 @@ export default class BetterCrafting extends Mod {
             ctrl.resolveWait = resolve;
         });
 
-        return Promise.race([turnEndPromise, abortPromise]);
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<void>(resolve => {
+            timeoutHandle = setTimeout(() => {
+                if (this.bulkAbortController && !this.bulkAbortController.aborted) {
+                    this.abortBulkCraft("turn_wait_timeout");
+                }
+                resolve();
+            }, timeoutMs);
+        });
+
+        return Promise.race([turnEndPromise, abortPromise, timeoutPromise]).finally(() => {
+            if (timeoutHandle !== undefined) {
+                clearTimeout(timeoutHandle);
+            }
+            if (this.bulkAbortController?.resolveWait) {
+                this.bulkAbortController.resolveWait = null;
+            }
+        });
     }
 
-    private waitForActionDelayClear(): Promise<void> {
+    private waitForActionDelayClear(timeoutMs = 10_000): Promise<void> {
+        const startedAt = Date.now();
         return new Promise<void>(resolve => {
             const poll = () => {
                 if (this.bulkAbortController?.aborted || !(localPlayer as any)?.hasDelay?.()) {
+                    resolve();
+                } else if (Date.now() - startedAt >= timeoutMs) {
+                    this.abortBulkCraft("action_delay_timeout");
                     resolve();
                 } else {
                     requestAnimationFrame(poll);
@@ -1854,28 +1879,13 @@ export default class BetterCrafting extends Mod {
         }
     }
 
-    private getRemainingDurabilityUses(requiredItem: Item, perUseLoss: number, leaveOneUse: boolean): number {
-        if (perUseLoss <= 0) return Number.MAX_SAFE_INTEGER;
-
-        const durability = requiredItem.durability ?? 0;
-        if (durability <= 0) return 0;
-
-        const usableActions = Math.ceil(durability / perUseLoss);
-        return Math.max(0, usableActions - (leaveOneUse ? 1 : 0));
-    }
-
     private canUseForDismantle(requiredItem?: Item, leaveOneUse = false): boolean {
         if (!requiredItem) return true;
 
-        const perUseLoss = Math.max(
-            0,
-            ((requiredItem.description as any)?.damageOnUse?.[ActionType.Dismantle] as number | undefined)
-                ?? requiredItem.getDamageModifier?.()
-                ?? 0,
-        );
+        const perUseLoss = getDismantleDurabilityLoss(requiredItem, ActionType.Dismantle);
 
         if (perUseLoss <= 0) return true;
-        return this.getRemainingDurabilityUses(requiredItem, perUseLoss, leaveOneUse) > 0;
+        return canUseDurability(requiredItem.durability, perUseLoss, leaveOneUse);
     }
 
     /**
@@ -2205,6 +2215,16 @@ export default class BetterCrafting extends Mod {
         const player = this.getPlayerFromConnection(connection);
         if (!player) return;
 
+        if (!Number.isFinite(request.quantity) || !Number.isInteger(request.quantity) || request.quantity <= 0 || request.quantity > 9999) {
+            this.sendApproval(connection, {
+                requestId: request.requestId,
+                kind: "bulkCraft",
+                approved: false,
+                message: "Invalid bulk craft quantity.",
+            });
+            return;
+        }
+
         const recipe = itemDescriptions[request.itemType]?.recipe;
         if (!recipe) {
             this.sendApproval(connection, {
@@ -2216,21 +2236,23 @@ export default class BetterCrafting extends Mod {
             return;
         }
 
-        // Light validation: ensure at least the first iteration can resolve.
-        const sessionConsumedIds = new Set<number>();
-        const resolved = this.resolveBulkSelection(player, request, sessionConsumedIds);
-        if (!resolved.value) {
-            if (resolved.failure) {
-                this.logSelectionFailure("Bulk craft request", request.requestId, resolved.failure);
+        let sessionConsumedIds = new Set<number>();
+        for (let i = 0; i < request.quantity; i++) {
+            const resolved = this.resolveBulkSelection(player, request, sessionConsumedIds);
+            if (!resolved.value) {
+                if (resolved.failure) {
+                    this.logSelectionFailure("Bulk craft request", request.requestId, resolved.failure);
+                }
+                this.sendApproval(connection, {
+                    requestId: request.requestId,
+                    kind: "bulkCraft",
+                    approved: false,
+                    message: resolved.failure?.message ?? "Your crafting selection is no longer valid.",
+                    selectionFailure: resolved.failure,
+                });
+                return;
             }
-            this.sendApproval(connection, {
-                requestId: request.requestId,
-                kind: "bulkCraft",
-                approved: false,
-                message: resolved.failure?.message ?? "Your crafting selection is no longer valid.",
-                selectionFailure: resolved.failure,
-            });
-            return;
+            sessionConsumedIds = resolved.value.sessionConsumedIds;
         }
 
         const key = this.getPlayerKey(player);

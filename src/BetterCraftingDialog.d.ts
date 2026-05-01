@@ -242,13 +242,11 @@ export default class BetterCraftingPanel extends Component {
     private addBulkItemRow;
     private addBulkUsedRow;
     private addBulkToolRow;
-    private getCraftDurabilityLoss;
-    private getDismantleDurabilityLoss;
-    private getRemainingUses;
-    private computeBulkDurabilityMax;
+    private computeBulkDurabilityMaxFromSelection;
     private prepareBulkPinnedSelections;
     private computeBulkLimits;
     private computeBulkMax;
+    private computeBulkUiLimits;
     private computeDismantleStaminaMax;
     private computeDismantleMax;
     private hasDismantleDurabilityLimit;
@@ -271,6 +269,8 @@ export default class BetterCraftingPanel extends Component {
     private resolveBulkCraftSelection;
     private getBulkToolCandidateOrder;
     private findBulkCandidates;
+    private createBulkCandidateCache;
+    private getBulkCachedCandidates;
     private bcGetOrCreateTooltip;
     private bcShowTooltip;
     private bcShowTextTooltip;
@@ -286,6 +286,7 @@ export default class BetterCraftingPanel extends Component {
     private setExplicitSelection;
     private pruneExplicitSelection;
     private collectExplicitReservations;
+    private getDefaultSectionSortDirection;
     private getSectionFilterState;
     private shouldReselectSection;
     private clearSectionReselect;

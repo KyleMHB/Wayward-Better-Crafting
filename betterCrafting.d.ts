@@ -94,7 +94,6 @@ export default class BetterCrafting extends Mod {
     private waitForTurnEnd;
     private waitForActionDelayClear;
     private abortBulkCraft;
-    private getRemainingDurabilityUses;
     private canUseForDismantle;
     private registerBulkInterruptHooks;
     private executeBulkCraft;

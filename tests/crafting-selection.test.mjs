@@ -99,3 +99,28 @@ test("filterSelectableItems removes invalid and duplicate item identities", asyn
         ]),
     );
 });
+
+test("item state helpers share protection and durability rules", async () => {
+    const {
+        canUseDurability,
+        getCraftDurabilityLoss,
+        getDismantleDurabilityLoss,
+        getRemainingDurabilityUses,
+        isItemProtected,
+    } = await loadTranspiledTsModule("./src/itemState.ts");
+
+    assert.equal(isItemProtected({ isProtected: true }), true);
+    assert.equal(isItemProtected({ protected: true }), true);
+    assert.equal(isItemProtected({}), false);
+
+    assert.equal(getCraftDurabilityLoss({ getDamageModifier: () => 3 }), 3);
+    assert.equal(getCraftDurabilityLoss({ getDamageModifier: () => -2 }), 0);
+    assert.equal(getDismantleDurabilityLoss({ description: { damageOnUse: { 7: 4 } }, getDamageModifier: () => 1 }, 7), 4);
+    assert.equal(getDismantleDurabilityLoss({ getDamageModifier: () => 2 }, 7), 2);
+
+    assert.equal(getRemainingDurabilityUses(10, 3, false), 4);
+    assert.equal(getRemainingDurabilityUses(10, 3, true), 3);
+    assert.equal(getRemainingDurabilityUses(undefined, 3, false), 0);
+    assert.equal(canUseDurability(1, 1, true), false);
+    assert.equal(canUseDurability(2, 1, true), true);
+});
