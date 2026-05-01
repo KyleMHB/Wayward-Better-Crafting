@@ -347,11 +347,11 @@ test("closing crafting clears per-window selections exclusions reservations and 
     assert.match(source, /public hidePanel\(\) \{[\s\S]*this\.resetWindowSessionState\(\);/);
 });
 
-test("fresh crafting sections default to quality descending after reset", async () => {
+test("fresh crafting sections default to best for crafting after reset", async () => {
     const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
 
     assert.match(source, /private clearSectionFilterStates\(\): void \{[\s\S]*this\.sectionFilterStates\.clear\(\);/);
-    assert.match(source, /sort: ContainerSort\.Quality,\s+sortDirection: this\.getDefaultSectionSortDirection\(ContainerSort\.Quality\),/);
+    assert.match(source, /sort: ContainerSort\.BestForCrafting,\s+sortDirection: this\.getDefaultSectionSortDirection\(ContainerSort\.BestForCrafting\),/);
     assert.match(source, /state\.sort === ContainerSort\.Quality[\s\S]*qualitySortKey\(b\.quality\) - qualitySortKey\(a\.quality\)/);
     assert.match(source, /public showPanel\(\) \{[\s\S]*if \(!wasVisible\) \{[\s\S]*this\.clearSectionFilterStates\(\);/);
 });

@@ -5698,8 +5698,8 @@ export default class BetterCraftingPanel extends Component {
         if (!state) {
             state = {
                 filterText: "",
-                sort: ContainerSort.Quality,
-                sortDirection: this.getDefaultSectionSortDirection(ContainerSort.Quality),
+                sort: ContainerSort.BestForCrafting,
+                sortDirection: this.getDefaultSectionSortDirection(ContainerSort.BestForCrafting),
                 debounceTimer: null,
             };
             this.sectionFilterStates.set(key, state);
