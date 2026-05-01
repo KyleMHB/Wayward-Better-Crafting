@@ -2770,10 +2770,12 @@ export default class BetterCraftingPanel extends Component {
     // ── Counter updates ───────────────────────────────────────────────────────
 
     private getSelectedCountForSection(slotIndex: number, semantic: SectionSemantic): number {
-        if (semantic === "consumed") {
+        const component = this.recipe?.components[slotIndex];
+        const split = component ? this.isSplitComponent(component) : false;
+        if (split && semantic === "consumed") {
             return this.getSplitSelection(slotIndex).consumed.length;
         }
-        if (semantic === "used") {
+        if (split && semantic === "used") {
             return this.getSplitSelection(slotIndex).used.length;
         }
 
