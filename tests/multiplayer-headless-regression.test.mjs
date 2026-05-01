@@ -227,8 +227,11 @@ test("section filters drive visible item ordering and active reselection", async
     assert.match(source, /private getFilteredSortedSectionItems\(/);
     assert.match(source, /ItemSort\.createSorter\(state\.sort, state\.sortDirection\)/);
     assert.match(source, /private pendingSectionReselectKeys: Set<string> = new Set\(\);/);
+    assert.match(source, /private pendingSortReselectKeys: Set<string> = new Set\(\);/);
     assert.match(source, /private getDefaultSectionSortDirection\(sort: ContainerSort\): SortDirection \{/);
     assert.match(source, /sort === ContainerSort\.Quality[\s\S]*SortDirection\.Descending[\s\S]*SortDirection\.Ascending/);
+    assert.match(source, /private shouldSortReselectSection\(view: SectionView, slotIndex: number, semantic: SectionSemantic\): boolean \{/);
+    assert.match(source, /view === "normal"[\s\S]*view === "bulk" && slotIndex >= 0 && \(semantic === "used" \|\| semantic === "tool"\)[\s\S]*view === "dismantle" && slotIndex === -2 && semantic === "tool"/);
     assert.match(source, /private normalizeNormalSelectionsForRender\(\): void \{/);
     assert.match(source, /this\.normalizeNormalSelectionsForRender\(\);/);
     assert.match(source, /private normalizeBulkSelectionsForRender\(\): void \{/);
@@ -239,7 +242,10 @@ test("section filters drive visible item ordering and active reselection", async
     assert.match(sortChangeBody, /const selectedSort = Number\(sort\.value\) as ContainerSort;/);
     assert.match(sortChangeBody, /state\.sort = selectedSort;/);
     assert.match(sortChangeBody, /state\.sortDirection = this\.getDefaultSectionSortDirection\(selectedSort\);/);
+    assert.match(sortChangeBody, /this\.shouldSortReselectSection\(view, slotIndex, semantic\)/);
+    assert.match(sortChangeBody, /this\.pendingSortReselectKeys\.add\(key\);/);
     assert.doesNotMatch(sortChangeBody, /pendingSectionReselectKeys\.add\(key\)/);
+    assert.doesNotMatch(directionClickBody, /pendingSortReselectKeys\.add\(key\)/);
     assert.doesNotMatch(directionClickBody, /pendingSectionReselectKeys\.add\(key\)/);
     assert.match(source, /direction\.textContent = "↕";/);
     assert.doesNotMatch(source, /direction\.textContent = state\.sortDirection === SortDirection\.Descending/);
@@ -308,6 +314,8 @@ test("normal craft reserves used and tool selections before consumed defaults", 
     const normalizeStart = source.indexOf("private normalizeNormalSelectionsForRender(): void {");
     const normalizeEnd = source.indexOf("private reportSelectionUnavailable", normalizeStart);
     const normalizeSource = source.slice(normalizeStart, normalizeEnd);
+    assert.match(normalizeSource, /this\.shouldReselectSectionForSort\("normal", slotIndex, semantic\)/);
+    assert.match(normalizeSource, /this\.clearSectionSortReselect\("normal", slotIndex, semantic\);/);
     assert.ok(normalizeSource.indexOf('repairRole(i, "used", "used"')
         < normalizeSource.indexOf('repairRole(i, "consumed", "consumed"'));
     assert.ok(normalizeSource.indexOf('repairRole(i, "tool", "tool"')
@@ -337,6 +345,7 @@ test("closing crafting clears per-window selections exclusions reservations and 
     assert.match(resetSource, /this\.normalRenderReservations\.clear\(\);/);
     assert.match(resetSource, /this\.sectionCounters\.clear\(\);/);
     assert.match(resetSource, /this\.pendingSectionReselectKeys\.clear\(\);/);
+    assert.match(resetSource, /this\.pendingSortReselectKeys\.clear\(\);/);
     assert.match(resetSource, /this\.clearSectionFilterStates\(\);/);
     assert.match(resetSource, /this\.bulkExcludedIds\.clear\(\);/);
     assert.match(resetSource, /this\.bulkPinnedToolSelections\.clear\(\);/);
@@ -365,6 +374,10 @@ test("bulk and dismantle reserve nonconsumed selections before consumed targets"
     assert.match(dialogSource, /preReservedUsedSelections\.set\(i, resolvedUsed\);/);
     assert.match(dialogSource, /preReservedToolSelections\.set\(i, resolvedPinned\);/);
     assert.match(dialogSource, /const preReserved = preReservedToolSelections\.get\(slotIndex\);/);
+    assert.match(dialogSource, /this\.shouldReselectSectionForSort\("bulk", slotIndex, semantic\)/);
+    assert.match(dialogSource, /this\.clearSectionSortReselect\("bulk", slotIndex, semantic\);/);
+    assert.match(dialogSource, /this\.shouldReselectSectionForSort\("dismantle", -2, "tool"\)/);
+    assert.match(dialogSource, /this\.clearSectionSortReselect\("dismantle", -2, "tool"\);/);
     assert.match(dialogSource, /private isIncludedDismantleTargetItem\(item: Item\): boolean \{/);
     assert.match(dialogSource, /const lockedByRequired = this\.isReservedDismantleRequiredItem\(item\);/);
     assert.match(dialogSource, /targetItemIds\.includes\(requiredItemId\)/);

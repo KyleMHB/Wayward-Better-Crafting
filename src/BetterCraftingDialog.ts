@@ -247,6 +247,7 @@ export default class BetterCraftingPanel extends Component {
     private sectionCounters: Map<string, Text> = new Map();
     private sectionFilterStates: Map<string, ISectionFilterState> = new Map();
     private pendingSectionReselectKeys: Set<string> = new Set();
+    private pendingSortReselectKeys: Set<string> = new Set();
 
     /** IDs of items selected before last craft. null = first open. */
     private _pendingSelectionIds: Map<number, number[]> | null = null;
@@ -1526,6 +1527,7 @@ export default class BetterCraftingPanel extends Component {
         this.normalRenderReservations.clear();
         this.sectionCounters.clear();
         this.pendingSectionReselectKeys.clear();
+        this.pendingSortReselectKeys.clear();
         this.clearSectionFilterStates();
 
         this.bulkExcludedIds.clear();
@@ -2598,9 +2600,11 @@ export default class BetterCraftingPanel extends Component {
             candidates: readonly Item[],
             maxCount: number,
         ): Item[] => {
-            const forceTopVisible = this.shouldReselectSection("normal", slotIndex, semantic);
+            const forceTopVisible = this.shouldReselectSection("normal", slotIndex, semantic)
+                || this.shouldReselectSectionForSort("normal", slotIndex, semantic);
             const repaired = this.repairSelectedItemsForRole(current, candidates, maxCount, this.normalRenderReservations, role, forceTopVisible);
             this.clearSectionReselect("normal", slotIndex, semantic);
+            this.clearSectionSortReselect("normal", slotIndex, semantic);
             this.pruneExplicitSelection("normal", slotIndex, semantic, repaired);
             this.reserveItemsForRole(this.normalRenderReservations, repaired, role);
             return repaired;
@@ -3643,9 +3647,10 @@ export default class BetterCraftingPanel extends Component {
         const items = this.findMatchingItems(required);
         const visibleItems = this.getFilteredSortedSectionItems("dismantle", -2, "tool", items);
         const selectableItems = this.getSelectableDismantleRequiredItems(visibleItems);
-        if (this.shouldReselectSection("dismantle", -2, "tool")) {
+        if (this.shouldReselectSection("dismantle", -2, "tool") || this.shouldReselectSectionForSort("dismantle", -2, "tool")) {
             this.dismantleRequiredSelection = selectableItems[0];
             this.clearSectionReselect("dismantle", -2, "tool");
+            this.clearSectionSortReselect("dismantle", -2, "tool");
         } else if (!this.dismantleRequiredSelection || !selectableItems.includes(this.dismantleRequiredSelection)) {
             this.dismantleRequiredSelection = undefined;
         }
@@ -4222,9 +4227,12 @@ export default class BetterCraftingPanel extends Component {
                     && !isItemProtected(item)
                     && (semantic !== "used" || !(this.bulkExcludedIds.get(slotIndex)?.has(itemId) ?? false));
             });
-            const forceTopVisible = current.length === 0 || this.shouldReselectSection("bulk", slotIndex, semantic);
+            const forceTopVisible = current.length === 0
+                || this.shouldReselectSection("bulk", slotIndex, semantic)
+                || this.shouldReselectSectionForSort("bulk", slotIndex, semantic);
             const repaired = this.repairSelectedItemsForRole(current, candidates, maxCount, reservations, semantic, forceTopVisible);
             this.clearSectionReselect("bulk", slotIndex, semantic);
+            this.clearSectionSortReselect("bulk", slotIndex, semantic);
             this.pruneExplicitSelection("bulk", slotIndex, semantic, repaired);
             this.reserveItemsForRole(reservations, repaired, semantic);
             return repaired;
@@ -5716,6 +5724,20 @@ export default class BetterCraftingPanel extends Component {
         this.pendingSectionReselectKeys.delete(this.getSectionStateKey(view, slotIndex, semantic));
     }
 
+    private shouldReselectSectionForSort(view: SectionView, slotIndex: number, semantic: SectionSemantic): boolean {
+        return this.pendingSortReselectKeys.has(this.getSectionStateKey(view, slotIndex, semantic));
+    }
+
+    private clearSectionSortReselect(view: SectionView, slotIndex: number, semantic: SectionSemantic): void {
+        this.pendingSortReselectKeys.delete(this.getSectionStateKey(view, slotIndex, semantic));
+    }
+
+    private shouldSortReselectSection(view: SectionView, slotIndex: number, semantic: SectionSemantic): boolean {
+        return view === "normal"
+            || (view === "bulk" && slotIndex >= 0 && (semantic === "used" || semantic === "tool"))
+            || (view === "dismantle" && slotIndex === -2 && semantic === "tool");
+    }
+
     private getItemDisplayName(item: Item): string {
         let displayName: string;
         try {
@@ -5800,6 +5822,9 @@ export default class BetterCraftingPanel extends Component {
             const selectedSort = Number(sort.value) as ContainerSort;
             state.sort = selectedSort;
             state.sortDirection = this.getDefaultSectionSortDirection(selectedSort);
+            if (this.shouldSortReselectSection(view, slotIndex, semantic)) {
+                this.pendingSortReselectKeys.add(key);
+            }
             rebuild();
         });
         controls.appendChild(sort);

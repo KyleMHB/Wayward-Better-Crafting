@@ -57,6 +57,7 @@ export default class BetterCraftingPanel extends Component {
     private sectionCounters;
     private sectionFilterStates;
     private pendingSectionReselectKeys;
+    private pendingSortReselectKeys;
     private _pendingSelectionIds;
     private _pendingSplitSelectionIds;
     private bcTooltipEl;
@@ -292,6 +293,9 @@ export default class BetterCraftingPanel extends Component {
     private getSectionFilterState;
     private shouldReselectSection;
     private clearSectionReselect;
+    private shouldReselectSectionForSort;
+    private clearSectionSortReselect;
+    private shouldSortReselectSection;
     private getItemDisplayName;
     private getFilteredSortedSectionItems;
     private formatAvailableCount;
