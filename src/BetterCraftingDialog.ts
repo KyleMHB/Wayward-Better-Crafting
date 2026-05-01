@@ -1869,7 +1869,7 @@ export default class BetterCraftingPanel extends Component {
 
     private serializeSlotSelection(slotIndex: number, type: ItemType | ItemTypeGroup, requiredAmount: number): ISelectionSlotIds | undefined {
         const component = this.recipe?.components[slotIndex];
-        const candidates = component && this.isSplitComponent(component)
+        const candidates = component && isSplitConsumption(component.requiredAmount, component.consumedAmount)
             ? this.mergeVisibleSplitCandidates(slotIndex, this.findMatchingItems(type))
             : this.getFilteredSortedSectionItems(
                 "normal",
@@ -1944,7 +1944,7 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < this.recipe.components.length; i++) {
             const component = this.recipe.components[i];
-            const candidates = this.isSplitComponent(component)
+            const candidates = isSplitConsumption(component.requiredAmount, component.consumedAmount)
                 ? this.mergeVisibleSplitCandidates(i, this.findMatchingItems(component.type))
                 : this.getFilteredSortedSectionItems(
                     "normal",
@@ -2326,7 +2326,7 @@ export default class BetterCraftingPanel extends Component {
         }
         for (let i = 0; i < this.recipe.components.length; i++) {
             const component = this.recipe.components[i];
-            if (this.isSplitComponent(component)) {
+            if (isSplitConsumption(component.requiredAmount, component.consumedAmount)) {
                 const usedItems = this.getFilteredSortedSectionItems("normal", i, "used", this.findMatchingItems(component.type));
                 const consumedItems = this.getFilteredSortedSectionItems("normal", i, "consumed", this.findMatchingItems(component.type));
                 const repairedSplit = this.repairSplitSelection(i, component, usedItems, consumedItems, pendingSplitIds?.get(i));
@@ -2455,7 +2455,7 @@ export default class BetterCraftingPanel extends Component {
         }
         for (let i = 0; i < this.recipe.components.length; i++) {
             const component = this.recipe.components[i];
-            if (this.isSplitComponent(component)) {
+            if (isSplitConsumption(component.requiredAmount, component.consumedAmount)) {
                 this.addComponentSection(i, component, "used");
             }
         }
@@ -2535,10 +2535,6 @@ export default class BetterCraftingPanel extends Component {
             }
         }
         return items.slice(0, maxCount);
-    }
-
-    private isSplitComponent(component: IRecipeComponent): boolean {
-        return isSplitConsumption(component.requiredAmount, component.consumedAmount);
     }
 
     private getSplitSelection(slotIndex: number): INormalSplitSelection {
@@ -2631,7 +2627,7 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < this.recipe.components.length; i++) {
             const component = this.recipe.components[i];
-            if (!this.isSplitComponent(component)) continue;
+            if (!isSplitConsumption(component.requiredAmount, component.consumedAmount)) continue;
 
             const splitSelection = this.getSplitSelection(i);
             const candidates = this.getFilteredSortedSectionItems("normal", i, "used", this.findMatchingItems(component.type));
@@ -2653,7 +2649,7 @@ export default class BetterCraftingPanel extends Component {
             if (component.consumedAmount <= 0) continue;
 
             const candidates = this.getFilteredSortedSectionItems("normal", i, "consumed", this.findMatchingItems(component.type));
-            if (this.isSplitComponent(component)) {
+            if (isSplitConsumption(component.requiredAmount, component.consumedAmount)) {
                 const splitSelection = this.getSplitSelection(i);
                 const consumed = repairRole(i, "consumed", "consumed", splitSelection.consumed, candidates, getConsumedSelectionCount(component.requiredAmount, component.consumedAmount));
                 this.setSplitSelection(i, consumed, splitSelection.used);
@@ -2688,7 +2684,7 @@ export default class BetterCraftingPanel extends Component {
         pendingSplitIds?: { consumedIds: number[]; usedIds: number[] },
         writeBack = true,
     ): { items: Item[]; split?: INormalSplitSelection } | undefined {
-        if (this.isSplitComponent(component)) {
+        if (isSplitConsumption(component.requiredAmount, component.consumedAmount)) {
             const repairedSplit = this.repairSplitSelection(slotIndex, component, candidates, candidates, pendingSplitIds);
             const repairedItems = [...repairedSplit.consumed, ...repairedSplit.used];
             if (repairedSplit.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
@@ -2750,7 +2746,7 @@ export default class BetterCraftingPanel extends Component {
         if (this.recipe) {
             for (let i = 0; i < this.recipe.components.length; i++) {
                 const component = this.recipe.components[i];
-                if (this.isSplitComponent(component)) {
+                if (isSplitConsumption(component.requiredAmount, component.consumedAmount)) {
                     const splitSelection = this.getSplitSelection(i);
                     if (splitSelection.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
                         || splitSelection.used.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) {
@@ -2781,7 +2777,7 @@ export default class BetterCraftingPanel extends Component {
 
     private getSelectedCountForSection(slotIndex: number, semantic: SectionSemantic): number {
         const component = this.recipe?.components[slotIndex];
-        const split = component ? this.isSplitComponent(component) : false;
+        const split = component ? isSplitConsumption(component.requiredAmount, component.consumedAmount) : false;
         if (split && semantic === "consumed") {
             return this.getSplitSelection(slotIndex).consumed.length;
         }
@@ -2985,7 +2981,7 @@ export default class BetterCraftingPanel extends Component {
     private addComponentSection(index: number, component: IRecipeComponent, semantic: SectionSemantic) {
         const section = this.createSection();
         const labelRow  = this.createLabelRow();
-        const split = this.isSplitComponent(component);
+        const split = isSplitConsumption(component.requiredAmount, component.consumedAmount);
         const maxSelect = semantic === "used"
             ? getUsedSelectionCount(component.requiredAmount, component.consumedAmount)
             : semantic === "consumed"
@@ -3507,7 +3503,7 @@ export default class BetterCraftingPanel extends Component {
         }
         for (let i = 0; i < this.recipe.components.length; i++) {
             const comp = this.recipe.components[i];
-            if (this.isSplitComponent(comp)) {
+            if (isSplitConsumption(comp.requiredAmount, comp.consumedAmount)) {
                 this.addBulkComponentSection(i, comp.type, getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount), "used");
             }
         }
@@ -4255,7 +4251,7 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < this.recipe.components.length; i++) {
             const comp = this.recipe.components[i];
-            if (!this.isSplitComponent(comp)) continue;
+            if (!isSplitConsumption(comp.requiredAmount, comp.consumedAmount)) continue;
 
             this.bulkPinnedUsedSelections.set(
                 i,
@@ -4692,7 +4688,7 @@ export default class BetterCraftingPanel extends Component {
             const comp = this.recipe.components[i];
             const items = selection.slotSelections.get(i) ?? [];
             const preserveDurability = this.bulkPreserveDurabilityBySlot.get(i) !== false;
-            const durabilityItems = this.isSplitComponent(comp)
+            const durabilityItems = isSplitConsumption(comp.requiredAmount, comp.consumedAmount)
                 ? items.slice(getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount))
                 : comp.consumedAmount <= 0
                     ? items
@@ -4719,7 +4715,7 @@ export default class BetterCraftingPanel extends Component {
         for (let i = 0; i < this.recipe.components.length; i++) {
             const comp = this.recipe.components[i];
             const items = selection.slotSelections.get(i) ?? [];
-            if (this.isSplitComponent(comp)) {
+            if (isSplitConsumption(comp.requiredAmount, comp.consumedAmount)) {
                 const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);
                 const usedItems = items.slice(getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount));
                 if (usedItems.length < usedCount) return false;
@@ -4987,14 +4983,14 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < this.recipe.components.length; i++) {
             const comp = this.recipe.components[i];
-            const expectedCount = this.isSplitComponent(comp)
+            const expectedCount = isSplitConsumption(comp.requiredAmount, comp.consumedAmount)
                 ? getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount)
                 : comp.consumedAmount <= 0
                     ? comp.requiredAmount
                     : 0;
             if (expectedCount === 0) continue;
 
-            const selected = this.isSplitComponent(comp)
+            const selected = isSplitConsumption(comp.requiredAmount, comp.consumedAmount)
                 ? (this.bulkPinnedUsedSelections.get(i) ?? [])
                 : (this.bulkPinnedToolSelections.get(i) ?? []);
             if (selected.length < expectedCount) {
@@ -5114,7 +5110,7 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < recipe.components.length; i++) {
             const comp = recipe.components[i];
-            if (this.isSplitComponent(comp)) {
+            if (isSplitConsumption(comp.requiredAmount, comp.consumedAmount)) {
                 const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);
                 const pinnedUsed = this.bulkPinnedUsedSelections.get(i) ?? [];
                 if (pinnedUsed.length === 0) continue;
@@ -5191,7 +5187,7 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < recipe.components.length; i++) {
             const comp = recipe.components[i];
-            if (this.isSplitComponent(comp)) {
+            if (isSplitConsumption(comp.requiredAmount, comp.consumedAmount)) {
                 const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);
                 const consumedCount = getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount);
                 const resolvedUsed = preReservedUsedSelections.get(i) ?? [];
@@ -5908,7 +5904,7 @@ export default class BetterCraftingPanel extends Component {
 
         for (let i = 0; i < this.recipe.components.length; i++) {
             const comp = this.recipe.components[i];
-            if (this.isSplitComponent(comp)) {
+            if (isSplitConsumption(comp.requiredAmount, comp.consumedAmount)) {
                 const splitSelection = this.getSplitSelection(i);
                 const consumedCount = getConsumedSelectionCount(comp.requiredAmount, comp.consumedAmount);
                 const usedCount = getUsedSelectionCount(comp.requiredAmount, comp.consumedAmount);

@@ -186,7 +186,6 @@ export default class BetterCraftingPanel extends Component {
     private getItemsByOrderedIds;
     private mergeVisibleSplitCandidates;
     private getPreSelectedItems;
-    private isSplitComponent;
     private getSplitSelection;
     private setSplitSelection;
     private clearSplitSelection;

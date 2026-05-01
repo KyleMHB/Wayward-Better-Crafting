@@ -140,6 +140,8 @@ interface IPartitionedSelection {
     consumed: Item[];
 }
 
+type MatchingItemCache = Map<string, Item[]>;
+
 interface IServerCraftBlockDiagnostics {
     playerIdentifier?: string;
     playerKey?: number;
@@ -191,6 +193,10 @@ function getCurrentStamina(): number {
 
 function isItemArg(value: unknown): value is Item {
     return typeof value === "object" && value !== null && "type" in value;
+}
+
+function getMatchingItemCacheKey(type: ItemType | ItemTypeGroup): string {
+    return `${ItemManager.isGroup(type) ? "group" : "type"}:${type}`;
 }
 
 function normalizeCloseHotkey(value: unknown): CloseHotkey | undefined {
@@ -1356,8 +1362,11 @@ export default class BetterCrafting extends Mod {
         return this.panel;
     }
 
-    private findMatchingItems(player: Player, type: ItemType | ItemTypeGroup): Item[] {
+    private findMatchingItems(player: Player, type: ItemType | ItemTypeGroup, cache?: MatchingItemCache): Item[] {
         if (!player?.island) return [];
+        const cacheKey = getMatchingItemCacheKey(type);
+        const cached = cache?.get(cacheKey);
+        if (cached) return cached;
 
         const items = player.island.items;
         const subContainerOpts = { includeSubContainers: true as true };
@@ -1380,7 +1389,9 @@ export default class BetterCrafting extends Mod {
             }
         }
 
-        return filterSelectableItems(result, getItemId).sort((a, b) => getQualitySortKey(b) - getQualitySortKey(a));
+        const matchingItems = filterSelectableItems(result, getItemId).sort((a, b) => getQualitySortKey(b) - getQualitySortKey(a));
+        cache?.set(cacheKey, matchingItems);
+        return matchingItems;
     }
 
     private buildRecipeInventorySnapshot(player: Player, itemType: ItemType): Record<string, unknown> {
@@ -1422,9 +1433,10 @@ export default class BetterCrafting extends Mod {
         options: {
             slotIndex?: number;
             failureReason?: ISelectionFailureDetails["reason"];
+            matchingItemCache?: MatchingItemCache;
         } = {},
     ): IResolutionResult<Item[]> {
-        const candidates = this.findMatchingItems(player, type);
+        const candidates = this.findMatchingItems(player, type, options.matchingItemCache);
         const candidateItemIds = candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined);
         const byId = new Map<number, Item>();
         for (const item of candidates) {
@@ -1572,6 +1584,7 @@ export default class BetterCrafting extends Mod {
         player: Player,
         request: IBulkCraftRequest,
         sessionConsumedIds: ReadonlySet<number>,
+        matchingItemCache = new Map<string, Item[]>(),
     ): IResolutionResult<IResolvedBulkSelection> {
         const recipe = itemDescriptions[request.itemType]?.recipe;
         if (!recipe) {
@@ -1605,6 +1618,7 @@ export default class BetterCrafting extends Mod {
                 const resolvedUsed = this.resolveSelectedItems(player, component.type, pinnedUsedIds, reservedIds, {
                     slotIndex: i,
                     failureReason: "pinnedToolUnavailable",
+                    matchingItemCache,
                 });
                 const usedCount = getUsedSelectionCount(component.requiredAmount, component.consumedAmount);
                 if (resolvedUsed.value && resolvedUsed.value.length >= usedCount) {
@@ -1621,6 +1635,7 @@ export default class BetterCrafting extends Mod {
             const resolvedPinned = this.resolveSelectedItems(player, component.type, pinnedToolIds, reservedIds, {
                 slotIndex: i,
                 failureReason: "pinnedToolUnavailable",
+                matchingItemCache,
             });
             if (resolvedPinned.value && resolvedPinned.value.length >= component.requiredAmount) {
                 preReservedToolSelections.set(i, resolvedPinned.value.slice(0, component.requiredAmount));
@@ -1629,7 +1644,7 @@ export default class BetterCrafting extends Mod {
 
         let base: Item | undefined;
         if (recipe.baseComponent !== undefined) {
-            const baseCandidates = this.findMatchingItems(player, recipe.baseComponent)
+            const baseCandidates = this.findMatchingItems(player, recipe.baseComponent, matchingItemCache)
                 .filter(item => {
                     const itemId = getItemId(item);
                     return itemId !== undefined && !reservedIds.has(itemId) && !isItemProtected(item);
@@ -1666,12 +1681,12 @@ export default class BetterCrafting extends Mod {
                             slotIndex: i,
                             itemTypeOrGroup: component.type as number,
                             requestedItemIds: pinnedUsedIds,
-                            candidateItemIds: this.findMatchingItems(player, component.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                            candidateItemIds: this.findMatchingItems(player, component.type, matchingItemCache).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
                         }),
                     };
                 }
 
-                const candidates = this.findMatchingItems(player, component.type)
+                const candidates = this.findMatchingItems(player, component.type, matchingItemCache)
                     .filter(item => {
                         const itemId = getItemId(item);
                         return itemId !== undefined && !reservedIds.has(itemId) && !isItemProtected(item);
@@ -1683,7 +1698,7 @@ export default class BetterCrafting extends Mod {
                             slotIndex: i,
                             itemTypeOrGroup: component.type as number,
                             requestedItemIds: pinnedUsedIds,
-                            candidateItemIds: this.findMatchingItems(player, component.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                            candidateItemIds: this.findMatchingItems(player, component.type, matchingItemCache).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
                         }),
                     };
                 }
@@ -1708,7 +1723,7 @@ export default class BetterCrafting extends Mod {
                             slotIndex: i,
                             itemTypeOrGroup: component.type as number,
                             requestedItemIds: pinnedToolIds,
-                            candidateItemIds: this.findMatchingItems(player, component.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                            candidateItemIds: this.findMatchingItems(player, component.type, matchingItemCache).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
                         }),
                     };
                 }
@@ -1716,7 +1731,7 @@ export default class BetterCrafting extends Mod {
                 continue;
             }
 
-            const candidates = this.findMatchingItems(player, component.type)
+            const candidates = this.findMatchingItems(player, component.type, matchingItemCache)
                 .filter(item => {
                     const itemId = getItemId(item);
                     return itemId !== undefined && !reservedIds.has(itemId) && !isItemProtected(item);
@@ -1728,7 +1743,7 @@ export default class BetterCrafting extends Mod {
                             slotIndex: i,
                             itemTypeOrGroup: component.type as number,
                             requestedItemIds: pinnedToolIds,
-                            candidateItemIds: this.findMatchingItems(player, component.type).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
+                            candidateItemIds: this.findMatchingItems(player, component.type, matchingItemCache).map(item => getItemId(item)).filter((id): id is number => id !== undefined),
                         }),
                     };
                 }
@@ -2314,8 +2329,9 @@ export default class BetterCrafting extends Mod {
         }
 
         let sessionConsumedIds = new Set<number>();
+        const matchingItemCache = new Map<string, Item[]>();
         for (let i = 0; i < request.quantity; i++) {
-            const resolved = this.resolveBulkSelection(player, request, sessionConsumedIds);
+            const resolved = this.resolveBulkSelection(player, request, sessionConsumedIds, matchingItemCache);
             if (!resolved.value) {
                 if (resolved.failure) {
                     this.logSelectionFailure("Bulk craft request", request.requestId, resolved.failure);

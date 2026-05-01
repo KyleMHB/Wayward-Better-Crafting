@@ -224,6 +224,21 @@ test("server pass consumption decrements and deletes exhausted passes", async ()
     assert.match(consumeSource, /const item = isItemArg\(args\[0\]\) \? args\[0\] : undefined;/);
 });
 
+test("bulk approval reuses request-local matching item cache while preserving exact simulation", async () => {
+    const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+    const bulkStart = source.indexOf("public processBulkCraftRequest(");
+    const bulkEnd = source.indexOf("/**\r\n     * Server-side: validates the dismantle request", bulkStart);
+    const bulkSource = source.slice(bulkStart, bulkEnd);
+
+    assert.match(source, /type MatchingItemCache = Map<string, Item\[]>;/);
+    assert.match(source, /function getMatchingItemCacheKey\(type: ItemType \| ItemTypeGroup\): string \{/);
+    assert.match(source, /private findMatchingItems\(player: Player, type: ItemType \| ItemTypeGroup, cache\?: MatchingItemCache\): Item\[] \{/);
+    assert.match(bulkSource, /const matchingItemCache = new Map<string, Item\[]>\(\);/);
+    assert.match(bulkSource, /for \(let i = 0; i < request\.quantity; i\+\+\) \{/);
+    assert.match(bulkSource, /this\.resolveBulkSelection\(player, request, sessionConsumedIds, matchingItemCache\)/);
+    assert.doesNotMatch(bulkSource, /Math\.min\(request\.quantity/);
+});
+
 test("bulk abort hooks cover movement damage and user stop", async () => {
     const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
 
@@ -254,6 +269,15 @@ test("dialog matching uses id set dedup and leaves sorting to section sorter", a
     assert.match(matchSource, /seenIds\.has\(itemId\)/);
     assert.doesNotMatch(matchSource, /result\.includes\(item\)/);
     assert.doesNotMatch(matchSource, /\.sort\(/);
+});
+
+test("split component checks are inlined through shared split-consumption helper", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    assert.doesNotMatch(source, /private isSplitComponent\(/);
+    assert.doesNotMatch(source, /this\.isSplitComponent\(/);
+    assert.match(source, /isSplitConsumption\(component\.requiredAmount, component\.consumedAmount\)/);
+    assert.match(source, /isSplitConsumption\(comp\.requiredAmount, comp\.consumedAmount\)/);
 });
 
 test("bulk durability limits only preserve one use when Protect remains enabled", async () => {
