@@ -35,8 +35,10 @@ export default class BetterCrafting extends Mod {
     private readonly pendingVanillaBypasses;
     private readonly serverCraftPasses;
     private readonly serverVanillaBypassPermits;
+    private readonly settingsOptionUnsubscribers;
     initializeGlobalData(data: unknown): IBetterCraftingGlobalData;
     onInitialize(): void;
+    private clearSettingsOptionSubscriptions;
     onLoad(): void;
     onUnload(): void;
     private get settings();
@@ -71,6 +73,10 @@ export default class BetterCrafting extends Mod {
     private getPlayerKey;
     private getPlayerFromConnection;
     private getConnectionForPlayer;
+    private getEntityIdentifier;
+    private getLiveServerPass;
+    private hasLiveServerPass;
+    private rejectLivePass;
     private buildCraftArgsSummary;
     private reportBlockedRemoteCraft;
     abortServerRequest(connection: any, request: IBulkActionAbortRequest): void;
@@ -103,6 +109,8 @@ export default class BetterCrafting extends Mod {
     processDismantleRequest(connection: any, request: IDismantleRequest): void;
     private isVanillaBypassCraftRequested;
     onPreExecuteAction(host: any, actionType: ActionType, actionApi: IActionHandlerApi<Entity>, args: any[]): false | void;
+    private handleServerPreExecute;
+    private handleClientPreExecute;
     onPostExecuteAction(host: any, actionType: ActionType, actionApi: IActionHandlerApi<Entity>, args: any[]): void;
 }
 export {};

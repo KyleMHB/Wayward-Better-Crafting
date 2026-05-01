@@ -71,6 +71,8 @@ const DEFAULT_SETTINGS: Readonly<IBetterCraftingGlobalData> = {
     debugLogging: false,
 };
 
+const MAX_BULK_CRAFT_QUANTITY = 256;
+
 const craftDebugLog = Log.warn("Better Crafting", "CraftDebug");
 
 interface IPendingApproval {
@@ -185,6 +187,10 @@ function getQualitySortKey(item: Item): number {
 
 function getCurrentStamina(): number {
     return localPlayer ? (localPlayer as any).stat?.get?.(Stat.Stamina)?.value ?? 0 : 0;
+}
+
+function isItemArg(value: unknown): value is Item {
+    return typeof value === "object" && value !== null && "type" in value;
 }
 
 function normalizeCloseHotkey(value: unknown): CloseHotkey | undefined {
@@ -429,6 +435,7 @@ export default class BetterCrafting extends Mod {
     private readonly serverCraftPasses = new Map<number, IServerCraftPass>();
     /** Server-side: tracks one-shot vanilla bypass craft permits per player. */
     private readonly serverVanillaBypassPermits = new Map<number, IServerVanillaCraftBypassPermit>();
+    private readonly settingsOptionUnsubscribers: Array<() => void> = [];
 
     // ── Mod lifecycle ─────────────────────────────────────────────────────────
 
@@ -440,6 +447,7 @@ export default class BetterCrafting extends Mod {
         this.clearHeldHotkeyState();
 
         TabMods.registerModOptions(this.mod, component => {
+            this.clearSettingsOptionSubscriptions();
             const container = component.element;
             container.replaceChildren();
 
@@ -462,11 +470,13 @@ export default class BetterCrafting extends Mod {
             const accessChoice = new Choice<ActivationMode>("holdHotkeyToAccess");
             accessChoice.setText(TranslationImpl.generator("Hold Hotkey to Access"));
             activationChoices.setChoices(bypassChoice, accessChoice);
-            activationChoices.event.subscribe("choose", (_: unknown, choice?: Choice<ActivationMode>) => {
+            const onActivationChoose = (_: unknown, choice?: Choice<ActivationMode>) => {
                 if (!choice) return;
                 this.globalData.activationMode = choice.id;
                 this.clearHeldHotkeyState();
-            });
+            };
+            activationChoices.event.subscribe("choose", onActivationChoose);
+            this.settingsOptionUnsubscribers.push(() => activationChoices.event.unsubscribe("choose", onActivationChoose));
             activationChoices.setRefreshMethod(() => activationChoices.get(this.settings.activationMode)!);
             activationChoices.refresh();
             container.appendChild(activationChoices.element);
@@ -485,11 +495,13 @@ export default class BetterCrafting extends Mod {
             const altChoice = new Choice<ActivationHotkey>("Alt");
             altChoice.setText(TranslationImpl.generator("Alt"));
             hotkeyChoices.setChoices(shiftChoice, controlChoice, altChoice);
-            hotkeyChoices.event.subscribe("choose", (_: unknown, choice?: Choice<ActivationHotkey>) => {
+            const onHotkeyChoose = (_: unknown, choice?: Choice<ActivationHotkey>) => {
                 if (!choice) return;
                 this.globalData.activationHotkey = choice.id;
                 this.clearHeldHotkeyState();
-            });
+            };
+            hotkeyChoices.event.subscribe("choose", onHotkeyChoose);
+            this.settingsOptionUnsubscribers.push(() => hotkeyChoices.event.unsubscribe("choose", onHotkeyChoose));
             hotkeyChoices.setRefreshMethod(() => hotkeyChoices.get(this.settings.activationHotkey)!);
             hotkeyChoices.refresh();
             container.appendChild(hotkeyChoices.element);
@@ -513,10 +525,12 @@ export default class BetterCrafting extends Mod {
                 return choice;
             });
             closeHotkeyChoices.setChoices(...closeHotkeyChoicesList);
-            closeHotkeyChoices.event.subscribe("choose", (_: unknown, choice?: Choice<CloseHotkey>) => {
+            const onCloseHotkeyChoose = (_: unknown, choice?: Choice<CloseHotkey>) => {
                 if (!choice) return;
                 this.globalData.closeHotkey = choice.id;
-            });
+            };
+            closeHotkeyChoices.event.subscribe("choose", onCloseHotkeyChoose);
+            this.settingsOptionUnsubscribers.push(() => closeHotkeyChoices.event.unsubscribe("choose", onCloseHotkeyChoose));
             closeHotkeyChoices.setRefreshMethod(() => closeHotkeyChoiceById.get(this.settings.closeHotkey) ?? closeHotkeyChoiceById.get(DEFAULT_SETTINGS.closeHotkey)!);
             closeHotkeyChoices.refresh();
             container.appendChild(closeHotkeyChoices.element);
@@ -535,9 +549,11 @@ export default class BetterCrafting extends Mod {
 
             const diagnosticsToggle = new CheckButton();
             diagnosticsToggle.setChecked(this.settings.debugLogging, false);
-            diagnosticsToggle.event.subscribe("toggle", (_: unknown, checked: boolean) => {
+            const onDiagnosticsToggle = (_: unknown, checked: boolean) => {
                 this.globalData.debugLogging = checked;
-            });
+            };
+            diagnosticsToggle.event.subscribe("toggle", onDiagnosticsToggle);
+            this.settingsOptionUnsubscribers.push(() => diagnosticsToggle.event.unsubscribe("toggle", onDiagnosticsToggle));
             diagnosticsRow.appendChild(diagnosticsToggle.element);
 
             const diagnosticsTextWrap = document.createElement("div");
@@ -561,6 +577,12 @@ export default class BetterCrafting extends Mod {
         });
     }
 
+    private clearSettingsOptionSubscriptions(): void {
+        for (const unsubscribe of this.settingsOptionUnsubscribers.splice(0)) {
+            unsubscribe();
+        }
+    }
+
     public override onLoad(): void {
         document.addEventListener("keydown", this.onKeyDown);
         document.addEventListener("keyup", this.onKeyUp);
@@ -574,6 +596,7 @@ export default class BetterCrafting extends Mod {
         this.clearHeldHotkeyState();
         this.clearPendingApprovals();
         this.clearPendingVanillaBypasses("mod_unload");
+        this.clearSettingsOptionSubscriptions();
         this.serverCraftPasses.clear();
         this.serverVanillaBypassPermits.clear();
         this.panel?.hidePanel();
@@ -940,10 +963,42 @@ export default class BetterCrafting extends Mod {
     }
 
     private getConnectionForPlayer(player: Player | undefined): any {
-        const identifier = (player as any)?.identifier as string | undefined;
+        const identifier = this.getEntityIdentifier(player);
         if (!identifier || !multiplayer?.isServer) return;
 
         return multiplayer.getClients().find(connection => connection.playerIdentifier === identifier);
+    }
+
+    private getEntityIdentifier(entity: Entity | Player | undefined): string | undefined {
+        return (entity as any)?.identifier as string | undefined;
+    }
+
+    private getLiveServerPass(playerKey: number): IServerCraftPass | undefined {
+        const pass = this.serverCraftPasses.get(playerKey);
+        if (!pass) return;
+
+        if (pass.remaining <= 0 || pass.expiresAt < Date.now()) {
+            this.serverCraftPasses.delete(playerKey);
+            return;
+        }
+
+        return pass;
+    }
+
+    private hasLiveServerPass(playerKey: number): boolean {
+        return this.getLiveServerPass(playerKey) !== undefined;
+    }
+
+    private rejectLivePass(connection: any, request: { requestId: number; kind: ICraftApprovalResponse["kind"] }, playerKey: number): boolean {
+        if (!this.hasLiveServerPass(playerKey)) return false;
+
+        this.sendApproval(connection, {
+            requestId: request.requestId,
+            kind: request.kind,
+            approved: false,
+            message: "A previous crafting batch is still active.",
+        });
+        return true;
     }
 
     private buildCraftArgsSummary(args: any[]): IServerCraftBlockDiagnostics["argsSummary"] {
@@ -1004,6 +1059,7 @@ export default class BetterCrafting extends Mod {
             });
             return;
         }
+        if (this.rejectLivePass(connection, { requestId: request.requestId, kind: "vanillaBypass" }, key)) return;
 
         const recipe = itemDescriptions[request.itemType]?.recipe;
         if (!recipe) {
@@ -1080,7 +1136,7 @@ export default class BetterCrafting extends Mod {
         const permit = this.serverVanillaBypassPermits.get(key);
         if (!permit) {
             this.debugLog(`No vanilla bypass permit found for player ${key}.`, {
-                playerIdentifier: (executor as any)?.identifier,
+                playerIdentifier: this.getEntityIdentifier(executor),
                 playerKey: key,
                 argsSummary: this.buildCraftArgsSummary(args),
             });
@@ -1198,7 +1254,7 @@ export default class BetterCrafting extends Mod {
         const pass = this.serverCraftPasses.get(key);
         if (!pass) {
             this.debugLog(`No server pass found for player ${key}.`, {
-                playerIdentifier: (executor as any)?.identifier,
+                playerIdentifier: this.getEntityIdentifier(executor),
                 playerKey: key,
                 actionType,
                 argsSummary: this.buildCraftArgsSummary(args),
@@ -1208,7 +1264,7 @@ export default class BetterCrafting extends Mod {
 
         if (pass.actionType !== actionType) {
             this.debugLog(`Server pass action type mismatch for player ${key}.`, {
-                playerIdentifier: (executor as any)?.identifier,
+                playerIdentifier: this.getEntityIdentifier(executor),
                 playerKey: key,
                 requestedActionType: actionType,
                 pass,
@@ -1225,7 +1281,7 @@ export default class BetterCrafting extends Mod {
         if (actionType === ActionType.Craft) {
             if ((args[0] as ItemType | undefined) !== pass.itemType) {
                 this.debugLog(`Server craft pass item type mismatch for player ${key}.`, {
-                    playerIdentifier: (executor as any)?.identifier,
+                    playerIdentifier: this.getEntityIdentifier(executor),
                     playerKey: key,
                     pass,
                     argsSummary: this.buildCraftArgsSummary(args),
@@ -1233,11 +1289,11 @@ export default class BetterCrafting extends Mod {
                 return false;
             }
         } else if (actionType === ActionType.Dismantle) {
-            const item = args[0] as Item | undefined;
+            const item = isItemArg(args[0]) ? args[0] : undefined;
             const itemId = getItemId(item);
             if (!item || item.type !== pass.itemType || itemId === undefined) {
                 this.debugLog(`Server dismantle pass target mismatch for player ${key}.`, {
-                    playerIdentifier: (executor as any)?.identifier,
+                    playerIdentifier: this.getEntityIdentifier(executor),
                     playerKey: key,
                     pass,
                     itemType: item?.type,
@@ -1247,7 +1303,7 @@ export default class BetterCrafting extends Mod {
             }
             if (pass.targetItemIds && !pass.targetItemIds.has(itemId)) {
                 this.debugLog(`Server dismantle pass item id mismatch for player ${key}.`, {
-                    playerIdentifier: (executor as any)?.identifier,
+                    playerIdentifier: this.getEntityIdentifier(executor),
                     playerKey: key,
                     pass,
                     itemId,
@@ -1259,7 +1315,7 @@ export default class BetterCrafting extends Mod {
 
         pass.remaining--;
         this.debugLog(`Consumed server pass ${pass.requestId} for player ${key}.`, {
-            playerIdentifier: (executor as any)?.identifier,
+            playerIdentifier: this.getEntityIdentifier(executor),
             playerKey: key,
             actionType,
             remaining: pass.remaining,
@@ -1305,19 +1361,22 @@ export default class BetterCrafting extends Mod {
 
         const items = player.island.items;
         const subContainerOpts = { includeSubContainers: true as true };
-        const result: Item[] = ItemManager.isGroup(type)
+        const isGroup = ItemManager.isGroup(type);
+        const result: Item[] = isGroup
             ? items.getItemsInContainerByGroup(player, type as ItemTypeGroup, subContainerOpts)
             : items.getItemsInContainerByType(player, type as ItemType, subContainerOpts);
+        const seenIds = new Set(result.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
 
         for (const container of items.getAdjacentContainers(player)) {
-            const adjacentItems = ItemManager.isGroup(type)
+            const adjacentItems = isGroup
                 ? items.getItemsInContainerByGroup(container, type as ItemTypeGroup, subContainerOpts)
                 : items.getItemsInContainerByType(container, type as ItemType, subContainerOpts);
 
             for (const item of adjacentItems) {
-                if (!result.includes(item)) {
-                    result.push(item);
-                }
+                const itemId = getItemId(item);
+                if (itemId === undefined || seenIds.has(itemId)) continue;
+                seenIds.add(itemId);
+                result.push(item);
             }
         }
 
@@ -1754,13 +1813,15 @@ export default class BetterCrafting extends Mod {
         try {
             const requiredItems = required ? [...required] : undefined;
             const consumedItems = consumed ? [...consumed] : undefined;
-            this.debugLog("NormalCraftPayload", {
-                itemType,
-                requiredIds: getItemIds(requiredItems, item => this.getItemId(item)),
-                consumedIds: getItemIds(consumedItems, item => this.getItemId(item)),
-                baseId: base ? this.getItemId(base) : undefined,
-                inventoryBefore: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
-            });
+            if (this.debugLoggingEnabled) {
+                this.debugLog("NormalCraftPayload", {
+                    itemType,
+                    requiredIds: getItemIds(requiredItems, item => this.getItemId(item)),
+                    consumedIds: getItemIds(consumedItems, item => this.getItemId(item)),
+                    baseId: base ? this.getItemId(base) : undefined,
+                    inventoryBefore: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
+                });
+            }
             await ActionExecutor.get(Craft).execute(
                 localPlayer,
                 itemType,
@@ -1769,19 +1830,23 @@ export default class BetterCrafting extends Mod {
                 base,
                 undefined,
             );
-            this.debugLog("NormalCraftPostExecute", {
-                itemType,
-                requiredIds: getItemIds(requiredItems, item => this.getItemId(item)),
-                consumedIds: getItemIds(consumedItems, item => this.getItemId(item)),
-                baseId: base ? this.getItemId(base) : undefined,
-                inventoryAfterExecute: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
-            });
+            if (this.debugLoggingEnabled) {
+                this.debugLog("NormalCraftPostExecute", {
+                    itemType,
+                    requiredIds: getItemIds(requiredItems, item => this.getItemId(item)),
+                    consumedIds: getItemIds(consumedItems, item => this.getItemId(item)),
+                    baseId: base ? this.getItemId(base) : undefined,
+                    inventoryAfterExecute: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
+                });
+            }
             this.panel?.refreshVisibleCraftingViews(true);
-            this.debugLog("NormalCraftPostRefresh", {
-                itemType,
-                inventoryAfterRefresh: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
-                panelSelectionState: this.panel?.buildCurrentNormalCraftSelectionState(),
-            });
+            if (this.debugLoggingEnabled) {
+                this.debugLog("NormalCraftPostRefresh", {
+                    itemType,
+                    inventoryAfterRefresh: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
+                    panelSelectionState: this.panel?.buildCurrentNormalCraftSelectionState(),
+                });
+            }
         } finally {
             this.bypassIntercept = false;
         }
@@ -1809,11 +1874,12 @@ export default class BetterCrafting extends Mod {
     private waitForTurnEnd(timeoutMs = 10_000): Promise<void> {
         const player = localPlayer;
         if (!player?.event?.subscribeNext) return Promise.resolve();
+        const hasDelay = (player as any).hasDelay?.bind(player) as (() => boolean) | undefined;
 
         const turnEndPromise = new Promise<void>(resolve => {
             player.event.subscribeNext("turnEnd", () => {
                 const poll = () => {
-                    if (this.bulkAbortController?.aborted || !(localPlayer as any)?.hasDelay?.()) {
+                    if (this.bulkAbortController?.aborted || !hasDelay?.()) {
                         resolve();
                     } else {
                         requestAnimationFrame(poll);
@@ -1852,9 +1918,11 @@ export default class BetterCrafting extends Mod {
 
     private waitForActionDelayClear(timeoutMs = 10_000): Promise<void> {
         const startedAt = Date.now();
+        const player = localPlayer;
+        const hasDelay = (player as any)?.hasDelay?.bind(player) as (() => boolean) | undefined;
         return new Promise<void>(resolve => {
             const poll = () => {
-                if (this.bulkAbortController?.aborted || !(localPlayer as any)?.hasDelay?.()) {
+                if (this.bulkAbortController?.aborted || !hasDelay?.()) {
                     resolve();
                 } else if (Date.now() - startedAt >= timeoutMs) {
                     this.abortBulkCraft("action_delay_timeout");
@@ -2013,14 +2081,16 @@ export default class BetterCrafting extends Mod {
                 // One vanilla Craft action.
                 const requiredItems = [...resolved.required];
                 const consumedItems = [...resolved.consumed];
-                this.debugLog("BulkCraftPayload", {
-                    itemType,
-                    iteration: i + 1,
-                    requiredIds: getItemIds(requiredItems, item => this.getItemId(item)),
-                    consumedIds: getItemIds(consumedItems, item => this.getItemId(item)),
-                    baseId: resolved.base ? this.getItemId(resolved.base) : undefined,
-                    inventoryBefore: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
-                });
+                if (this.debugLoggingEnabled) {
+                    this.debugLog("BulkCraftPayload", {
+                        itemType,
+                        iteration: i + 1,
+                        requiredIds: getItemIds(requiredItems, item => this.getItemId(item)),
+                        consumedIds: getItemIds(consumedItems, item => this.getItemId(item)),
+                        baseId: resolved.base ? this.getItemId(resolved.base) : undefined,
+                        inventoryBefore: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
+                    });
+                }
                 await ActionExecutor.get(Craft).execute(
                     localPlayer,
                     itemType,
@@ -2029,11 +2099,13 @@ export default class BetterCrafting extends Mod {
                     resolved.base,
                     undefined,
                 );
-                this.debugLog("BulkCraftPostExecute", {
-                    itemType,
-                    iteration: i + 1,
-                    inventoryAfterExecute: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
-                });
+                if (this.debugLoggingEnabled) {
+                    this.debugLog("BulkCraftPostExecute", {
+                        itemType,
+                        iteration: i + 1,
+                        inventoryAfterExecute: localPlayer ? this.buildRecipeInventorySnapshot(localPlayer, itemType) : undefined,
+                    });
+                }
 
                 // Track consumed IDs to guard against re-picking before game state updates.
                 for (const item of resolved.consumed) {
@@ -2162,6 +2234,10 @@ export default class BetterCrafting extends Mod {
         const player = this.getPlayerFromConnection(connection);
         if (!player) return;
 
+        const key = this.getPlayerKey(player);
+        if (key === undefined) return;
+        if (this.rejectLivePass(connection, { requestId: request.requestId, kind: "craft" }, key)) return;
+
         const resolved = this.resolveCraftSelection(player, request);
         if (!resolved.value) {
             if (resolved.failure) {
@@ -2176,9 +2252,6 @@ export default class BetterCrafting extends Mod {
             });
             return;
         }
-
-        const key = this.getPlayerKey(player);
-        if (key === undefined) return;
 
         this.serverCraftPasses.set(key, {
             actionType: ActionType.Craft,
@@ -2215,12 +2288,16 @@ export default class BetterCrafting extends Mod {
         const player = this.getPlayerFromConnection(connection);
         if (!player) return;
 
-        if (!Number.isFinite(request.quantity) || !Number.isInteger(request.quantity) || request.quantity <= 0 || request.quantity > 9999) {
+        const key = this.getPlayerKey(player);
+        if (key === undefined) return;
+        if (this.rejectLivePass(connection, { requestId: request.requestId, kind: "bulkCraft" }, key)) return;
+
+        if (!Number.isFinite(request.quantity) || !Number.isInteger(request.quantity) || request.quantity <= 0 || request.quantity > MAX_BULK_CRAFT_QUANTITY) {
             this.sendApproval(connection, {
                 requestId: request.requestId,
                 kind: "bulkCraft",
                 approved: false,
-                message: "Invalid bulk craft quantity.",
+                message: `Bulk craft quantity must be between 1 and ${MAX_BULK_CRAFT_QUANTITY}.`,
             });
             return;
         }
@@ -2254,9 +2331,6 @@ export default class BetterCrafting extends Mod {
             }
             sessionConsumedIds = resolved.value.sessionConsumedIds;
         }
-
-        const key = this.getPlayerKey(player);
-        if (key === undefined) return;
 
         this.serverCraftPasses.set(key, {
             actionType: ActionType.Craft,
@@ -2294,6 +2368,10 @@ export default class BetterCrafting extends Mod {
         const player = this.getPlayerFromConnection(connection);
         if (!player) return;
 
+        const key = this.getPlayerKey(player);
+        if (key === undefined) return;
+        if (this.rejectLivePass(connection, { requestId: request.requestId, kind: "dismantle" }, key)) return;
+
         const dismantle = itemDescriptions[request.itemType]?.dismantle;
         if (!dismantle) {
             this.sendApproval(connection, {
@@ -2315,9 +2393,6 @@ export default class BetterCrafting extends Mod {
             });
             return;
         }
-
-        const key = this.getPlayerKey(player);
-        if (key === undefined) return;
 
         this.serverCraftPasses.set(key, {
             actionType: ActionType.Dismantle,
@@ -2363,6 +2438,17 @@ export default class BetterCrafting extends Mod {
         actionApi: IActionHandlerApi<Entity>,
         args: any[],
     ): false | void {
+        const serverResult = this.handleServerPreExecute(actionType, actionApi, args);
+        if (serverResult !== undefined) return serverResult;
+
+        return this.handleClientPreExecute(actionType, actionApi, args);
+    }
+
+    private handleServerPreExecute(
+        actionType: ActionType,
+        actionApi: IActionHandlerApi<Entity>,
+        args: any[],
+    ): false | void {
         // ── Server-side: permanent block for remote players' Craft/Dismantle ──
         // Blocks stale vanilla ActionPackets that race ahead of the mod's
         // interception on the client. Approved actions consume a pass credit
@@ -2379,7 +2465,7 @@ export default class BetterCrafting extends Mod {
                         ? this.getVanillaCraftActionDetails(args)
                         : undefined;
                     this.debugLog(`Evaluating remote ${ActionType[actionType]} action on server.`, {
-                        playerIdentifier: (player as any)?.identifier,
+                        playerIdentifier: this.getEntityIdentifier(player),
                         playerKey,
                         actionType,
                         itemType: args[0] as ItemType | undefined,
@@ -2396,7 +2482,7 @@ export default class BetterCrafting extends Mod {
                     }
                     if (actionType === ActionType.Craft) {
                         this.reportBlockedRemoteCraft(player, "That vanilla craft could not be validated in multiplayer. Try again without bypass if it keeps happening.", {
-                            playerIdentifier: (player as any)?.identifier,
+                            playerIdentifier: this.getEntityIdentifier(player),
                             playerKey,
                             actionType,
                             itemType: args[0] as ItemType | undefined,
@@ -2433,10 +2519,10 @@ export default class BetterCrafting extends Mod {
                         });
                     } else {
                         this.reportBlockedRemoteCraft(player, "That dismantle action could not be validated in multiplayer. Try again if it keeps happening.", {
-                            playerIdentifier: (player as any)?.identifier,
+                            playerIdentifier: this.getEntityIdentifier(player),
                             playerKey,
                             actionType,
-                            itemType: (args[0] as Item | undefined)?.type,
+                            itemType: isItemArg(args[0]) ? args[0].type : undefined,
                             requestId: pass?.requestId,
                             argsSummary: this.buildCraftArgsSummary(args),
                             pass: pass
@@ -2456,6 +2542,14 @@ export default class BetterCrafting extends Mod {
             }
         }
 
+        return;
+    }
+
+    private handleClientPreExecute(
+        actionType: ActionType,
+        actionApi: IActionHandlerApi<Entity>,
+        args: any[],
+    ): false | void {
         if (this.isVanillaBypassCraftRequested(actionType, actionApi)) {
             const queued = this.trySendVanillaBypassPermit(args);
             if (queued) {

@@ -193,9 +193,67 @@ test("dismantle runtime and UI share the same preserve-one-use semantics", async
 test("bulk approval validates quantity and simulates every requested iteration", async () => {
     const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
 
-    assert.match(source, /if \(!Number\.isFinite\(request\.quantity\) \|\| !Number\.isInteger\(request\.quantity\) \|\| request\.quantity <= 0 \|\| request\.quantity > 9999\)/);
+    assert.match(source, /const MAX_BULK_CRAFT_QUANTITY = 256;/);
+    assert.match(source, /request\.quantity > MAX_BULK_CRAFT_QUANTITY/);
+    assert.match(source, /Bulk craft quantity must be between 1 and \$\{MAX_BULK_CRAFT_QUANTITY\}\./);
     assert.match(source, /for \(let i = 0; i < request\.quantity; i\+\+\)/);
     assert.match(source, /sessionConsumedIds = resolved\.value\.sessionConsumedIds;/);
+});
+
+test("server approvals reject live passes instead of overwriting them", async () => {
+    const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+
+    assert.match(source, /private getLiveServerPass\(playerKey: number\): IServerCraftPass \| undefined \{/);
+    assert.match(source, /if \(pass\.remaining <= 0 \|\| pass\.expiresAt < Date\.now\(\)\) \{/);
+    assert.match(source, /private rejectLivePass\(/);
+    assert.match(source, /message: "A previous crafting batch is still active\."/);
+    assert.match(source, /kind: "vanillaBypass" \}, key\)\) return;/);
+    assert.match(source, /kind: "craft" \}, key\)\) return;/);
+    assert.match(source, /kind: "bulkCraft" \}, key\)\) return;/);
+    assert.match(source, /kind: "dismantle" \}, key\)\) return;/);
+});
+
+test("server pass consumption decrements and deletes exhausted passes", async () => {
+    const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+    const consumeStart = source.indexOf("private consumeServerPass(");
+    const consumeEnd = source.indexOf("// ── Panel management", consumeStart);
+    const consumeSource = source.slice(consumeStart, consumeEnd);
+
+    assert.match(consumeSource, /pass\.remaining--;/);
+    assert.match(consumeSource, /if \(pass\.remaining <= 0\) \{[\s\S]*this\.serverCraftPasses\.delete\(key\);/);
+    assert.match(consumeSource, /const item = isItemArg\(args\[0\]\) \? args\[0\] : undefined;/);
+});
+
+test("bulk abort hooks cover movement damage and user stop", async () => {
+    const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
+
+    assert.match(source, /if \(fromTile !== toTile\) this\.abortBulkCraft\("movement"\);/);
+    assert.match(source, /this\.abortBulkCraft\("damage"\);/);
+    assert.match(source, /this\.panel\?\.setBulkAbortCallback\(\(\) => \{[\s\S]*this\.abortBulkCraft\("user_stop"\);/);
+});
+
+test("dialog hardening preserves manual dismantle exclusions and strict quantity input", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+
+    assert.match(source, /private dismantleTargetsManuallyEdited = false;/);
+    assert.match(source, /if \(this\.shouldReselectSection\("dismantle", -1, "consumed"\) && !this\.dismantleTargetsManuallyEdited\) \{/);
+    assert.match(source, /this\.dismantleTargetsManuallyEdited = true;/);
+    assert.match(source, /this\.dismantleTargetsManuallyEdited = false;/);
+    assert.match(source, /const raw = this\.bulkQtyInputEl!\.value\.trim\(\);/);
+    assert.ok(source.includes("const v = /^\\d+$/.test(raw) ? Number(raw) : NaN;"));
+    assert.doesNotMatch(source, /parseInt\(this\.bulkQtyInputEl!\.value, 10\)/);
+});
+
+test("dialog matching uses id set dedup and leaves sorting to section sorter", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+    const matchStart = source.indexOf("private findMatchingItems(type: ItemType | ItemTypeGroup): Item[] {");
+    const matchEnd = source.indexOf("// ── Craft action", matchStart);
+    const matchSource = source.slice(matchStart, matchEnd);
+
+    assert.match(matchSource, /const seenIds = new Set/);
+    assert.match(matchSource, /seenIds\.has\(itemId\)/);
+    assert.doesNotMatch(matchSource, /result\.includes\(item\)/);
+    assert.doesNotMatch(matchSource, /\.sort\(/);
 });
 
 test("bulk durability limits only preserve one use when Protect remains enabled", async () => {
@@ -377,7 +435,7 @@ test("fresh crafting sections default to best for crafting after reset", async (
 
     assert.match(source, /private clearSectionFilterStates\(\): void \{[\s\S]*this\.sectionFilterStates\.clear\(\);/);
     assert.match(source, /sort: ContainerSort\.BestForCrafting,\s+sortDirection: this\.getDefaultSectionSortDirection\(ContainerSort\.BestForCrafting\),/);
-    assert.match(source, /state\.sort === ContainerSort\.Quality[\s\S]*qualitySortKey\(b\.quality\) - qualitySortKey\(a\.quality\)/);
+    assert.match(source, /state\.sort === ContainerSort\.Quality[\s\S]*this\.compareQuality\(a, b, state\.sortDirection\)/);
     assert.match(source, /public showPanel\(\) \{[\s\S]*if \(!wasVisible\) \{[\s\S]*this\.clearSectionFilterStates\(\);/);
 });
 

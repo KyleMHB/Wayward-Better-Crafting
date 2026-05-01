@@ -34,7 +34,10 @@ test("getItemIdSafe returns undefined for stale item identities while strict loo
 
     assert.equal(getItemIdSafe(undefined), undefined);
     assert.equal(getItemIdSafe({ id: 42 }), 42);
+    assert.equal(getItemIdSafe({ id: 0 }), 0);
     assert.equal(getItemIdSafe({ id: "42" }), undefined);
+    assert.equal(getItemIdSafe({ id: NaN }), undefined);
+    assert.equal(getItemIdSafe({ id: null }), undefined);
     assert.throws(() => getValidatedItemId({ id: "42" }, "item"), /Expected item\.id to be a finite number/);
 });
 

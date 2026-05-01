@@ -103,6 +103,7 @@ export default class BetterCraftingPanel extends Component {
     private dismantleExcludedIds;
     private dismantleRequiredSelection?;
     private dismantleSelectedItemType?;
+    private dismantleTargetsManuallyEdited;
     private preserveDismantleRequiredDurability;
     private helpBoxExpanded;
     private get activationHotkey();
@@ -297,6 +298,7 @@ export default class BetterCraftingPanel extends Component {
     private clearSectionSortReselect;
     private shouldSortReselectSection;
     private getItemDisplayName;
+    private compareQuality;
     private getFilteredSortedSectionItems;
     private formatAvailableCount;
     private appendSectionControls;

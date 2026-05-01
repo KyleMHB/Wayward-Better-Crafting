@@ -166,6 +166,7 @@ const SCREEN_THEME = {
 } as const;
 
 const craftDebugLog = Log.warn("Better Crafting", "CraftDebug");
+const MAX_BULK_CRAFT_QUANTITY = 256;
 
 function getQualityColor(quality?: Quality): string {
     return QUALITY_COLORS[quality ?? Quality.None] ?? QUALITY_COLORS[Quality.None];
@@ -309,6 +310,7 @@ export default class BetterCraftingPanel extends Component {
     private dismantleExcludedIds = new Set<number>();
     private dismantleRequiredSelection?: Item;
     private dismantleSelectedItemType?: ItemType;
+    private dismantleTargetsManuallyEdited = false;
     private preserveDismantleRequiredDurability = true;
     private helpBoxExpanded: Record<HelpBoxId, boolean> = {
         normal: false,
@@ -1385,8 +1387,9 @@ export default class BetterCraftingPanel extends Component {
         this.bulkQtyInputEl.min = "1";
         this.bulkQtyInputEl.value = String(this.bulkQuantity);
         this.bulkQtyInputEl.addEventListener("change", () => {
-            const v = parseInt(this.bulkQtyInputEl!.value, 10);
-            if (!isNaN(v) && v >= 1) {
+            const raw = this.bulkQtyInputEl!.value.trim();
+            const v = /^\d+$/.test(raw) ? Number(raw) : NaN;
+            if (Number.isInteger(v) && v >= 1) {
                 const limits = this.computeBulkUiLimits();
                 const max = limits.max;
                 // Clamp to max regardless of whether max is 0; floor to 1 for display
@@ -1544,6 +1547,7 @@ export default class BetterCraftingPanel extends Component {
         this.dismantleDescription = undefined;
         this.dismantleRequiredSelection = undefined;
         this.dismantleSelectedItemType = undefined;
+        this.dismantleTargetsManuallyEdited = false;
         this.preserveDismantleRequiredDurability = true;
     }
 
@@ -2100,6 +2104,7 @@ export default class BetterCraftingPanel extends Component {
         this.dismantleDescription = dismantle;
         this.bulkQuantity = 1;
         this.dismantleExcludedIds.clear();
+        this.dismantleTargetsManuallyEdited = false;
         this.dismantleRequiredSelection = undefined;
         this.preserveDismantleRequiredDurability = true;
         this.resetSafeCraftingEnabled();
@@ -2382,6 +2387,7 @@ export default class BetterCraftingPanel extends Component {
         });
         if (!preserveSelections) {
             this.dismantleExcludedIds.clear();
+            this.dismantleTargetsManuallyEdited = false;
             this.dismantleRequiredSelection = undefined;
         }
 
@@ -3684,7 +3690,7 @@ export default class BetterCraftingPanel extends Component {
         const labelRow = this.createLabelRow();
         const items = this.findMatchingItems(itemType);
         const visibleItems = this.getFilteredSortedSectionItems("dismantle", -1, "consumed", items);
-        if (this.shouldReselectSection("dismantle", -1, "consumed")) {
+        if (this.shouldReselectSection("dismantle", -1, "consumed") && !this.dismantleTargetsManuallyEdited) {
             const eligibleVisibleItems = visibleItems.filter(item => !isItemProtected(item) && !this.isReservedDismantleRequiredItem(item));
             const includedIds = new Set(eligibleVisibleItems.slice(0, this.bulkQuantity).map(item => getItemId(item)).filter((id): id is number => id !== undefined));
             this.dismantleExcludedIds.clear();
@@ -3695,6 +3701,8 @@ export default class BetterCraftingPanel extends Component {
                     this.dismantleExcludedIds.add(itemId);
                 }
             }
+            this.clearSectionReselect("dismantle", -1, "consumed");
+        } else {
             this.clearSectionReselect("dismantle", -1, "consumed");
         }
 
@@ -3929,6 +3937,7 @@ export default class BetterCraftingPanel extends Component {
 
         if (!locked) {
             row.event.subscribe("activate", () => {
+                this.dismantleTargetsManuallyEdited = true;
                 if (itemId !== undefined && this.dismantleExcludedIds.has(itemId)) {
                     this.dismantleExcludedIds.delete(itemId);
                 } else {
@@ -4137,7 +4146,7 @@ export default class BetterCraftingPanel extends Component {
         const reservedNonconsumedIds = this.getBulkReservedNonconsumedIds();
         const isConsumedSide = sectionSemantic === "base" || semantic === "consumed";
         const visibleItems = sortedVisibleItems;
-        const availableCount = items.filter(item => {
+        const availableCount = visibleItems.filter(item => {
             const itemId = getItemId(item);
             const excludedIds = this.bulkExcludedIds.get(slotIndex) ?? new Set<number>();
             if (semantic === "used") {
@@ -4734,15 +4743,15 @@ export default class BetterCraftingPanel extends Component {
         const currentStamina = this.getCurrentStamina();
         const staminaMax = !this.safeCraftingEnabled
             ? Number.MAX_SAFE_INTEGER
-            : staminaCost > 0 ? Math.floor(currentStamina / staminaCost) : 9999;
+            : staminaCost > 0 ? Math.floor(currentStamina / staminaCost) : MAX_BULK_CRAFT_QUANTITY;
 
         let materialMax = 0;
         let durabilityMax = Number.MAX_SAFE_INTEGER;
         const excludedIds = this.getBulkExcludedIds();
         const permanentlyConsumedIds = new Set<number>();
         const materialIterationCap = this.safeCraftingEnabled
-            ? Math.max(1, Math.min(9999, staminaMax))
-            : 9999;
+            ? Math.max(1, Math.min(MAX_BULK_CRAFT_QUANTITY, staminaMax))
+            : MAX_BULK_CRAFT_QUANTITY;
         const candidateCache = this.createBulkCandidateCache();
 
         for (let i = 0; i < materialIterationCap; i++) {
@@ -5756,6 +5765,12 @@ export default class BetterCraftingPanel extends Component {
         return qualityName ? `${qualityName} ${displayName}` : displayName;
     }
 
+    private compareQuality(a: Item, b: Item, direction: SortDirection): number {
+        return direction === SortDirection.Descending
+            ? qualitySortKey(b.quality) - qualitySortKey(a.quality)
+            : qualitySortKey(a.quality) - qualitySortKey(b.quality);
+    }
+
     private getFilteredSortedSectionItems(
         view: SectionView,
         slotIndex: number,
@@ -5771,9 +5786,7 @@ export default class BetterCraftingPanel extends Component {
 
         return visible.sort((a, b) => {
             const sorted = state.sort === ContainerSort.Quality
-                ? state.sortDirection === SortDirection.Descending
-                    ? qualitySortKey(b.quality) - qualitySortKey(a.quality)
-                    : qualitySortKey(a.quality) - qualitySortKey(b.quality)
+                ? this.compareQuality(a, b, state.sortDirection)
                 : sorter(a, b);
             if (sorted !== 0) return sorted;
 
@@ -5863,22 +5876,27 @@ export default class BetterCraftingPanel extends Component {
         if (!localPlayer) return [];
         const items = localPlayer.island.items;
         const subContainerOpts = { includeSubContainers: true as true };
+        const isGroup = ItemManager.isGroup(type);
 
-        const result: Item[] = ItemManager.isGroup(type)
+        const result: Item[] = isGroup
             ? items.getItemsInContainerByGroup(localPlayer, type as ItemTypeGroup, subContainerOpts)
             : items.getItemsInContainerByType(localPlayer, type as ItemType, subContainerOpts);
+        const seenIds = new Set(result.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
 
         const adjacentContainers = items.getAdjacentContainers(localPlayer);
         for (const container of adjacentContainers) {
-            const adjacentItems: Item[] = ItemManager.isGroup(type)
+            const adjacentItems: Item[] = isGroup
                 ? items.getItemsInContainerByGroup(container, type as ItemTypeGroup, subContainerOpts)
                 : items.getItemsInContainerByType(container, type as ItemType, subContainerOpts);
             for (const item of adjacentItems) {
-                if (!result.includes(item)) result.push(item);
+                const itemId = getItemId(item);
+                if (itemId === undefined || seenIds.has(itemId)) continue;
+                seenIds.add(itemId);
+                result.push(item);
             }
         }
 
-        return filterSelectableItems(result, getItemId).sort((a, b) => qualitySortKey(b.quality) - qualitySortKey(a.quality));
+        return filterSelectableItems(result, getItemId);
     }
 
     // ── Craft action ──────────────────────────────────────────────────────────

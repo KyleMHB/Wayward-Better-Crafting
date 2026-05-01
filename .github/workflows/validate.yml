@@ -24,3 +24,9 @@ jobs:
 
       - name: Verify
         run: npm run verify
+
+      - name: Build
+        run: npm run build
+
+      - name: Check Generated Artifacts
+        run: git diff --quiet
