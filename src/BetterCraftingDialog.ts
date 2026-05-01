@@ -2315,21 +2315,24 @@ export default class BetterCraftingPanel extends Component {
 
         // Pre-populate selections before building sections.
         if (this.recipe!.baseComponent !== undefined) {
-            const items = this.findMatchingItems(this.recipe.baseComponent);
+            const items = this.getFilteredSortedSectionItems("normal", -1, "base", this.findMatchingItems(this.recipe.baseComponent));
             const pre = this.getPreSelectedItems(items, 1, pendingIds?.get(-1));
             if (pre.length) this.selectedItems.set(-1, pre);
         }
         for (let i = 0; i < this.recipe.components.length; i++) {
             const component = this.recipe.components[i];
-            const items = this.findMatchingItems(component.type);
             if (this.isSplitComponent(component)) {
-                const repairedSplit = this.repairSplitSelection(i, component, items, pendingSplitIds?.get(i));
+                const usedItems = this.getFilteredSortedSectionItems("normal", i, "used", this.findMatchingItems(component.type));
+                const consumedItems = this.getFilteredSortedSectionItems("normal", i, "consumed", this.findMatchingItems(component.type));
+                const repairedSplit = this.repairSplitSelection(i, component, usedItems, consumedItems, pendingSplitIds?.get(i));
                 if (repairedSplit.consumed.length || repairedSplit.used.length) {
                     this.setSplitSelection(i, repairedSplit.consumed, repairedSplit.used);
                 }
                 continue;
             }
 
+            const semantic: SectionSemantic = component.consumedAmount <= 0 ? "tool" : "consumed";
+            const items = this.getFilteredSortedSectionItems("normal", i, semantic, this.findMatchingItems(component.type));
             const pre = this.getPreSelectedItems(items, component.requiredAmount, pendingIds?.get(i));
             if (pre.length) {
                 this.clearSplitSelection(i);
@@ -2561,27 +2564,28 @@ export default class BetterCraftingPanel extends Component {
     private repairSplitSelection(
         slotIndex: number,
         component: IRecipeComponent,
-        candidates: readonly Item[],
+        usedCandidates: readonly Item[],
+        consumedCandidates: readonly Item[],
         pendingSplitIds?: { consumedIds: number[]; usedIds: number[] },
     ): INormalSplitSelection {
         const consumedCount = getConsumedSelectionCount(component.requiredAmount, component.consumedAmount);
         const usedCount = getUsedSelectionCount(component.requiredAmount, component.consumedAmount);
         const current = pendingSplitIds
             ? {
-                consumed: this.getItemsByOrderedIds(candidates, pendingSplitIds.consumedIds),
-                used: this.getItemsByOrderedIds(candidates, pendingSplitIds.usedIds),
+                consumed: this.getItemsByOrderedIds(consumedCandidates, pendingSplitIds.consumedIds),
+                used: this.getItemsByOrderedIds(usedCandidates, pendingSplitIds.usedIds),
             }
             : this.getSplitSelection(slotIndex);
 
-        const used = this.sanitizeSelectedItems(current.used, candidates, usedCount);
-        const repairedUsed = this.supplementSelectedItems(used, candidates, usedCount);
+        const used = this.sanitizeSelectedItems(current.used, usedCandidates, usedCount);
+        const repairedUsed = this.supplementSelectedItems(used, usedCandidates, usedCount);
         const repairedUsedIds = new Set(repairedUsed.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
-        const consumedCandidates = candidates.filter(item => {
+        const availableConsumedCandidates = consumedCandidates.filter(item => {
             const itemId = getItemId(item);
             return itemId === undefined || !repairedUsedIds.has(itemId);
         });
-        const consumed = this.sanitizeSelectedItems(current.consumed, consumedCandidates, consumedCount);
-        const repairedConsumed = this.supplementSelectedItems(consumed, consumedCandidates, consumedCount);
+        const consumed = this.sanitizeSelectedItems(current.consumed, availableConsumedCandidates, consumedCount);
+        const repairedConsumed = this.supplementSelectedItems(consumed, availableConsumedCandidates, consumedCount);
 
         return {
             consumed: repairedConsumed,
@@ -2679,7 +2683,7 @@ export default class BetterCraftingPanel extends Component {
         writeBack = true,
     ): { items: Item[]; split?: INormalSplitSelection } | undefined {
         if (this.isSplitComponent(component)) {
-            const repairedSplit = this.repairSplitSelection(slotIndex, component, candidates, pendingSplitIds);
+            const repairedSplit = this.repairSplitSelection(slotIndex, component, candidates, candidates, pendingSplitIds);
             const repairedItems = [...repairedSplit.consumed, ...repairedSplit.used];
             if (repairedSplit.consumed.length < getConsumedSelectionCount(component.requiredAmount, component.consumedAmount)
                 || repairedSplit.used.length < getUsedSelectionCount(component.requiredAmount, component.consumedAmount)) {

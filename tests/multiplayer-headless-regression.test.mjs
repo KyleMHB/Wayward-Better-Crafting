@@ -251,6 +251,21 @@ test("section filters drive visible item ordering and active reselection", async
     assert.doesNotMatch(source, /direction\.textContent = state\.sortDirection === SortDirection\.Descending/);
 });
 
+test("normal craft auto-fill selects from rendered sorted section candidates", async () => {
+    const source = await readFile(new URL("../src/BetterCraftingDialog.ts", import.meta.url), "utf8");
+    const updateStart = source.indexOf("public updateRecipe(itemType: number, clearResults = true, preserveScroll = false) {");
+    const updateEnd = source.indexOf("public refreshNormalCraftView", updateStart);
+    const updateSource = source.slice(updateStart, updateEnd);
+
+    assert.match(updateSource, /const items = this\.getFilteredSortedSectionItems\("normal", -1, "base", this\.findMatchingItems\(this\.recipe\.baseComponent\)\);/);
+    assert.match(updateSource, /const usedItems = this\.getFilteredSortedSectionItems\("normal", i, "used", this\.findMatchingItems\(component\.type\)\);/);
+    assert.match(updateSource, /const consumedItems = this\.getFilteredSortedSectionItems\("normal", i, "consumed", this\.findMatchingItems\(component\.type\)\);/);
+    assert.match(updateSource, /this\.repairSplitSelection\(i, component, usedItems, consumedItems, pendingSplitIds\?\.get\(i\)\)/);
+    assert.match(updateSource, /const semantic: SectionSemantic = component\.consumedAmount <= 0 \? "tool" : "consumed";/);
+    assert.match(updateSource, /const items = this\.getFilteredSortedSectionItems\("normal", i, semantic, this\.findMatchingItems\(component\.type\)\);/);
+    assert.doesNotMatch(updateSource, /const items = this\.findMatchingItems\(component\.type\);/);
+});
+
 test("filter inputs do not update mod-level hotkey state", async () => {
     const source = await readFile(new URL("../betterCrafting.ts", import.meta.url), "utf8");
 
@@ -306,10 +321,11 @@ test("normal craft reserves used and tool selections before consumed defaults", 
     const splitRepairStart = source.indexOf("private repairSplitSelection(");
     const splitRepairEnd = source.indexOf("private normalizeNormalSelectionsForRender", splitRepairStart);
     const splitRepairSource = source.slice(splitRepairStart, splitRepairEnd);
-    assert.ok(splitRepairSource.indexOf("const repairedUsed = this.supplementSelectedItems(used, candidates, usedCount);")
-        < splitRepairSource.indexOf("const consumedCandidates = candidates.filter(item => {"));
+    assert.match(splitRepairSource, /usedCandidates: readonly Item\[\],[\s\S]*consumedCandidates: readonly Item\[\],/);
+    assert.ok(splitRepairSource.indexOf("const repairedUsed = this.supplementSelectedItems(used, usedCandidates, usedCount);")
+        < splitRepairSource.indexOf("const availableConsumedCandidates = consumedCandidates.filter(item => {"));
     assert.match(splitRepairSource, /return itemId === undefined \|\| !repairedUsedIds\.has\(itemId\);/);
-    assert.match(splitRepairSource, /const repairedConsumed = this\.supplementSelectedItems\(consumed, consumedCandidates, consumedCount\);/);
+    assert.match(splitRepairSource, /const repairedConsumed = this\.supplementSelectedItems\(consumed, availableConsumedCandidates, consumedCount\);/);
 
     const normalizeStart = source.indexOf("private normalizeNormalSelectionsForRender(): void {");
     const normalizeEnd = source.indexOf("private reportSelectionUnavailable", normalizeStart);
