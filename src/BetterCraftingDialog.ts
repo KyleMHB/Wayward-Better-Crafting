@@ -11,7 +11,6 @@ import { SkillType } from "@wayward/game/game/entity/skill/ISkills";
 import type Item from "@wayward/game/game/item/Item";
 import ItemManager from "@wayward/game/game/item/ItemManager";
 import { Article } from "@wayward/game/language/ITranslation";
-import { Quality } from "@wayward/game/game/IObject";
 import { ActionType } from "@wayward/game/game/entity/action/IAction";
 import { SortDirection } from "@wayward/game/save/ISaveManager";
 import ItemComponent from "@wayward/game/ui/screen/screens/game/component/ItemComponent";
@@ -31,6 +30,23 @@ import {
     partitionSelectedItems,
 } from "./craftingSelection";
 import { getCraftStaminaCost } from "./craftStamina";
+import {
+    compareQuality,
+    getQualityColor,
+    getQualityName,
+} from "./dialog/sort";
+import {
+    repairSelectedItemsForRole,
+    repairSplitSelection,
+    sanitizeSelectedItems,
+} from "./dialog/selection";
+import {
+    ROW_MARGIN,
+    ROW_MIN_HEIGHT,
+    ROW_PADDING_V,
+    SCREEN_THEME,
+    SECTION_SORTS,
+} from "./dialog/theme";
 import { getItemIdSafe, getItemIds } from "./itemIdentity";
 import {
     getCraftDurabilityLoss,
@@ -127,61 +143,8 @@ interface IResolvedNormalCraftSelection {
 type PanelMode = "craft" | "dismantle";
 type HelpBoxId = "normal" | "bulk" | "dismantle";
 
-// Quality enum value -> CSS color
-const QUALITY_COLORS: Record<number, string> = {
-    [Quality.None]:          "#e0d0b0",
-    [Quality.Random]:        "#e0d0b0",
-    [Quality.Superior]:      "#33ff99",
-    [Quality.Remarkable]:    "#00b4ff",
-    [Quality.Exceptional]:   "#ce5eff",
-    [Quality.Mastercrafted]: "#ff8c00",
-    [Quality.Relic]:         "#ffd700",
-};
-
-const SCREEN_THEME = {
-    normal: {
-        title: "#d4c89a",
-        body: "#9a8860",
-        accent: "#c0b080",
-        strong: "#d4c89a",
-        muted: "#7a6850",
-        unsafe: "#c0b080",
-    },
-    bulk: {
-        title: "#a8d0ef",
-        body: "#8ab8d8",
-        accent: "#c3def3",
-        strong: "#c3def3",
-        muted: "#78aace",
-        unsafe: "#8ab8d8",
-    },
-    dismantle: {
-        title: "#d79b86",
-        body: "#e1b4a3",
-        accent: "#f0c8bb",
-        strong: "#f0c8bb",
-        muted: "#c9826a",
-        unsafe: "#d79b86",
-    },
-} as const;
-
 const craftDebugLog = Log.warn("Better Crafting", "CraftDebug");
 const MAX_BULK_CRAFT_QUANTITY = 256;
-
-function getQualityColor(quality?: Quality): string {
-    return QUALITY_COLORS[quality ?? Quality.None] ?? QUALITY_COLORS[Quality.None];
-}
-
-function getQualityName(quality?: Quality): string {
-    if (quality === undefined || quality === Quality.None || quality === Quality.Random) return "";
-    return Quality[quality] ?? "";
-}
-
-function qualitySortKey(quality?: Quality): number {
-    const q = quality ?? Quality.None;
-    if (q === Quality.None || q === Quality.Random) return 0;
-    return q as number;
-}
 
 function getItemId(item: Item | undefined): number | undefined {
     return getItemIdSafe(item);
@@ -201,22 +164,6 @@ function toRoman(n: number): string {
 function getSectionCounterKey(slotIndex: number, semantic: SectionSemantic = "base"): string {
     return `${slotIndex}:${semantic}`;
 }
-
-const ROW_MIN_HEIGHT = 30;   // px
-const ROW_PADDING_V   = 4;    // px top+bottom
-const ROW_MARGIN      = 2;    // px top + 2px bottom
-const SECTION_SORTS = [
-    ContainerSort.Recent,
-    ContainerSort.Name,
-    ContainerSort.Weight,
-    ContainerSort.Group,
-    ContainerSort.Durability,
-    ContainerSort.Quality,
-    ContainerSort.Magical,
-    ContainerSort.Decay,
-    ContainerSort.Worth,
-    ContainerSort.BestForCrafting,
-] as const;
 
 export { DEFAULT_CRAFT_STAMINA_COST, STAMINA_COST_PER_LEVEL } from "./craftStamina";
 
@@ -1632,20 +1579,7 @@ export default class BetterCraftingPanel extends Component {
     }
 
     private sanitizeSelectedItems(items: Array<Item | undefined>, candidates?: readonly Item[], maxCount?: number): Item[] {
-        const candidateIds = candidates ? new Set(candidates.map(item => getItemId(item)).filter((id): id is number => id !== undefined)) : undefined;
-        const seenIds = new Set<number>();
-        const sanitized: Item[] = [];
-
-        for (const item of items) {
-            const itemId = getItemId(item);
-            if (!item || itemId === undefined || seenIds.has(itemId)) continue;
-            if (candidateIds && !candidateIds.has(itemId)) continue;
-            sanitized.push(item);
-            seenIds.add(itemId);
-            if (maxCount !== undefined && sanitized.length >= maxCount) break;
-        }
-
-        return sanitized;
+        return sanitizeSelectedItems(items, getItemId, candidates, maxCount);
     }
 
     private getReservationRoleLabel(role: SelectionReservationRole): string {
@@ -1677,19 +1611,6 @@ export default class BetterCraftingPanel extends Component {
         return reservedRole !== undefined && reservedRole !== currentRole ? reservedRole : undefined;
     }
 
-    private filterUnreservedItems(
-        items: readonly Item[],
-        reservations: ReadonlyMap<number, SelectionReservationRole>,
-        currentRole?: SelectionReservationRole,
-    ): Item[] {
-        return items.filter(item => {
-            const itemId = getItemId(item);
-            if (itemId === undefined) return true;
-            const reservedRole = reservations.get(itemId);
-            return reservedRole === undefined || reservedRole === currentRole;
-        });
-    }
-
     private repairSelectedItemsForRole(
         selectedItems: readonly Item[],
         candidates: readonly Item[],
@@ -1698,16 +1619,7 @@ export default class BetterCraftingPanel extends Component {
         role: SelectionReservationRole,
         forceTopVisible = false,
     ): Item[] {
-        const selectableCandidates = this.filterUnreservedItems(candidates, reservations, role);
-        if (forceTopVisible) return selectableCandidates.slice(0, maxCount);
-
-        const candidateValidSelection = this.sanitizeSelectedItems([...selectedItems], candidates, maxCount);
-        const repairedSelection = this.sanitizeSelectedItems([...selectedItems], selectableCandidates, maxCount);
-        if (repairedSelection.length < candidateValidSelection.length) {
-            return this.supplementSelectedItems(repairedSelection, selectableCandidates, maxCount);
-        }
-
-        return repairedSelection;
+        return repairSelectedItemsForRole(selectedItems, candidates, maxCount, reservations, role, getItemId, forceTopVisible);
     }
 
     private hasDuplicateItemIds(items: readonly Item[]): boolean {
@@ -1722,24 +1634,6 @@ export default class BetterCraftingPanel extends Component {
         }
 
         return false;
-    }
-
-    private supplementSelectedItems(selectedItems: Item[], candidates: readonly Item[], maxCount: number): Item[] {
-        if (selectedItems.length >= maxCount) return selectedItems.slice(0, maxCount);
-
-        const selectedIds = new Set(selectedItems.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
-        const supplemented = [...selectedItems];
-
-        for (const item of candidates) {
-            const itemId = getItemId(item);
-            if (itemId !== undefined && selectedIds.has(itemId)) continue;
-
-            supplemented.push(item);
-            if (itemId !== undefined) selectedIds.add(itemId);
-            if (supplemented.length >= maxCount) break;
-        }
-
-        return supplemented;
     }
 
     private getSelectionFailureMessage(details: ISelectionFailureDetails): string {
@@ -2570,8 +2464,6 @@ export default class BetterCraftingPanel extends Component {
         consumedCandidates: readonly Item[],
         pendingSplitIds?: { consumedIds: number[]; usedIds: number[] },
     ): INormalSplitSelection {
-        const consumedCount = getConsumedSelectionCount(component.requiredAmount, component.consumedAmount);
-        const usedCount = getUsedSelectionCount(component.requiredAmount, component.consumedAmount);
         const current = pendingSplitIds
             ? {
                 consumed: this.getItemsByOrderedIds(consumedCandidates, pendingSplitIds.consumedIds),
@@ -2579,20 +2471,7 @@ export default class BetterCraftingPanel extends Component {
             }
             : this.getSplitSelection(slotIndex);
 
-        const used = this.sanitizeSelectedItems(current.used, usedCandidates, usedCount);
-        const repairedUsed = this.supplementSelectedItems(used, usedCandidates, usedCount);
-        const repairedUsedIds = new Set(repairedUsed.map(item => getItemId(item)).filter((id): id is number => id !== undefined));
-        const availableConsumedCandidates = consumedCandidates.filter(item => {
-            const itemId = getItemId(item);
-            return itemId === undefined || !repairedUsedIds.has(itemId);
-        });
-        const consumed = this.sanitizeSelectedItems(current.consumed, availableConsumedCandidates, consumedCount);
-        const repairedConsumed = this.supplementSelectedItems(consumed, availableConsumedCandidates, consumedCount);
-
-        return {
-            consumed: repairedConsumed,
-            used: repairedUsed,
-        };
+        return repairSplitSelection(component, current, usedCandidates, consumedCandidates, getItemId);
     }
 
     private normalizeNormalSelectionsForRender(): void {
@@ -5761,12 +5640,6 @@ export default class BetterCraftingPanel extends Component {
         return qualityName ? `${qualityName} ${displayName}` : displayName;
     }
 
-    private compareQuality(a: Item, b: Item, direction: SortDirection): number {
-        return direction === SortDirection.Descending
-            ? qualitySortKey(b.quality) - qualitySortKey(a.quality)
-            : qualitySortKey(a.quality) - qualitySortKey(b.quality);
-    }
-
     private getFilteredSortedSectionItems(
         view: SectionView,
         slotIndex: number,
@@ -5782,7 +5655,7 @@ export default class BetterCraftingPanel extends Component {
 
         return visible.sort((a, b) => {
             const sorted = state.sort === ContainerSort.Quality
-                ? this.compareQuality(a, b, state.sortDirection)
+                ? compareQuality(a, b, state.sortDirection)
                 : sorter(a, b);
             if (sorted !== 0) return sorted;
 

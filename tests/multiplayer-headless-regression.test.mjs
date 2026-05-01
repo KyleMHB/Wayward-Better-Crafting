@@ -404,10 +404,7 @@ test("normal craft reserves used and tool selections before consumed defaults", 
     const splitRepairEnd = source.indexOf("private normalizeNormalSelectionsForRender", splitRepairStart);
     const splitRepairSource = source.slice(splitRepairStart, splitRepairEnd);
     assert.match(splitRepairSource, /usedCandidates: readonly Item\[\],[\s\S]*consumedCandidates: readonly Item\[\],/);
-    assert.ok(splitRepairSource.indexOf("const repairedUsed = this.supplementSelectedItems(used, usedCandidates, usedCount);")
-        < splitRepairSource.indexOf("const availableConsumedCandidates = consumedCandidates.filter(item => {"));
-    assert.match(splitRepairSource, /return itemId === undefined \|\| !repairedUsedIds\.has\(itemId\);/);
-    assert.match(splitRepairSource, /const repairedConsumed = this\.supplementSelectedItems\(consumed, availableConsumedCandidates, consumedCount\);/);
+    assert.match(splitRepairSource, /return repairSplitSelection\(component, current, usedCandidates, consumedCandidates, getItemId\);/);
 
     const normalizeStart = source.indexOf("private normalizeNormalSelectionsForRender(): void {");
     const normalizeEnd = source.indexOf("private reportSelectionUnavailable", normalizeStart);
@@ -459,7 +456,7 @@ test("fresh crafting sections default to best for crafting after reset", async (
 
     assert.match(source, /private clearSectionFilterStates\(\): void \{[\s\S]*this\.sectionFilterStates\.clear\(\);/);
     assert.match(source, /sort: ContainerSort\.BestForCrafting,\s+sortDirection: this\.getDefaultSectionSortDirection\(ContainerSort\.BestForCrafting\),/);
-    assert.match(source, /state\.sort === ContainerSort\.Quality[\s\S]*this\.compareQuality\(a, b, state\.sortDirection\)/);
+    assert.match(source, /state\.sort === ContainerSort\.Quality[\s\S]*compareQuality\(a, b, state\.sortDirection\)/);
     assert.match(source, /public showPanel\(\) \{[\s\S]*if \(!wasVisible\) \{[\s\S]*this\.clearSectionFilterStates\(\);/);
 });
 

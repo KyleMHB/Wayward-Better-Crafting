@@ -147,11 +147,9 @@ export default class BetterCraftingPanel extends Component {
     private getReservationRoleLabel;
     private reserveItemsForRole;
     private getReservationConflict;
-    private filterUnreservedItems;
     private repairSelectedItemsForRole;
     private hasDuplicateItemIds;
     private hasDuplicateIds;
-    private supplementSelectedItems;
     private getSelectionFailureMessage;
     private setBulkResolutionFailure;
     buildCraftRequestDiagnostics(request: ICraftSelectionRequest): Record<string, unknown>;
@@ -297,7 +295,6 @@ export default class BetterCraftingPanel extends Component {
     private clearSectionSortReselect;
     private shouldSortReselectSection;
     private getItemDisplayName;
-    private compareQuality;
     private getFilteredSortedSectionItems;
     private formatAvailableCount;
     private appendSectionControls;
