@@ -103,8 +103,7 @@ This file summarizes the changes made across the project chats and commits for t
 
 - Added and updated `README.md` with features, installation, development commands, compatibility, and credits.
 - Added Steam Workshop copy in `steam-workshop-copy.md`.
-- Added `CHANGELOG.md`.
-- Added this `change.md` project rollup.
+- Added `CHANGELOG.MD` as the project change rollup.
 
 ## Repository Hygiene
 
