@@ -5,6 +5,8 @@ dist/
 *.tsbuildinfo
 .claude/
 mod-reference/
+.DS_Store
+.codex-write-check
 
 *.local.json
 CLAUDE.md
